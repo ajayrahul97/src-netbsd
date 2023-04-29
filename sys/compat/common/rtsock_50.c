@@ -1,4 +1,4 @@
-/*	$NetBSD: rtsock_50.c,v 1.4 2015/08/24 22:50:33 pooka Exp $	*/
+/*	$NetBSD: rtsock_50.c,v 1.13 2019/04/29 16:12:30 roy Exp $	*/
 
 /*
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
@@ -61,20 +61,17 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: rtsock_50.c,v 1.4 2015/08/24 22:50:33 pooka Exp $");
+__KERNEL_RCSID(0, "$NetBSD: rtsock_50.c,v 1.13 2019/04/29 16:12:30 roy Exp $");
 
-#ifdef _KERNEL_OPT
-#include "opt_compat_netbsd.h"
-#endif
+#define	COMPAT_RTSOCK	/* Use the COMPATNAME/COMPATCALL macros and the
+			 * various other compat definitions - see
+			 * sys/net/rtsock_shared.c for details
+			 */
 
-#if defined(COMPAT_14) && !defined(COMPAT_50)
-#define	COMPAT_50	1	/* 1.4 needs 5.0 */
-#endif
+#include <net/rtsock_shared.c>
+#include <compat/net/route_50.h>
 
-#if defined(COMPAT_50)
-#define	COMPAT_RTSOCK
-
-#include <net/rtsock.c>
+struct sysctllog *clog;
 
 void
 compat_50_rt_oifmsg(struct ifnet *ifp)
@@ -92,6 +89,7 @@ compat_50_rt_oifmsg(struct ifnet *ifp)
 	oifm.ifm_data.ifi_type = ifp->if_data.ifi_type;
 	oifm.ifm_data.ifi_addrlen = ifp->if_data.ifi_addrlen;
 	oifm.ifm_data.ifi_hdrlen = ifp->if_data.ifi_hdrlen;
+	oifm.ifm_data.ifi_link_state = ifp->if_data.ifi_link_state;
 	oifm.ifm_data.ifi_mtu = ifp->if_data.ifi_mtu;
 	oifm.ifm_data.ifi_metric = ifp->if_data.ifi_metric;
 	oifm.ifm_data.ifi_baudrate = ifp->if_data.ifi_baudrate;
@@ -128,6 +126,7 @@ compat_50_iflist(struct ifnet *ifp, struct rt_walkarg *w,
 	ifm->ifm_data.ifi_type = ifp->if_data.ifi_type;
 	ifm->ifm_data.ifi_addrlen = ifp->if_data.ifi_addrlen;
 	ifm->ifm_data.ifi_hdrlen = ifp->if_data.ifi_hdrlen;
+	ifm->ifm_data.ifi_link_state = ifp->if_data.ifi_link_state;
 	ifm->ifm_data.ifi_mtu = ifp->if_data.ifi_mtu;
 	ifm->ifm_data.ifi_metric = ifp->if_data.ifi_metric;
 	ifm->ifm_data.ifi_baudrate = ifp->if_data.ifi_baudrate;
@@ -152,4 +151,40 @@ compat_50_iflist(struct ifnet *ifp, struct rt_walkarg *w,
 	return 0;
 }
 
-#endif /* COMPAT_50 */
+void
+rtsock_50_init(void)
+{
+ 
+	MODULE_HOOK_SET(rtsock_iflist_50_hook, "rts_50", compat_50_iflist);
+	MODULE_HOOK_SET(rtsock_oifmsg_50_hook, "rts_50", compat_50_rt_oifmsg);
+	MODULE_HOOK_SET(rtsock_rt_missmsg_50_hook, "rts_50",
+	    compat_50_rt_missmsg);
+	MODULE_HOOK_SET(rtsock_rt_ifmsg_50_hook, "rts_50", compat_50_rt_ifmsg);
+	MODULE_HOOK_SET(rtsock_rt_addrmsg_rt_50_hook, "rts_50",
+	    compat_50_rt_addrmsg_rt);
+	MODULE_HOOK_SET(rtsock_rt_addrmsg_src_50_hook, "rts_50",
+	    compat_50_rt_addrmsg_src);
+	MODULE_HOOK_SET(rtsock_rt_addrmsg_50_hook, "rts_50",
+	    compat_50_rt_addrmsg);
+	MODULE_HOOK_SET(rtsock_rt_ifannouncemsg_50_hook, "rts_50",
+	    compat_50_rt_ifannouncemsg);
+	MODULE_HOOK_SET(rtsock_rt_ieee80211msg_50_hook, "rts_50",
+	    compat_50_rt_ieee80211msg);
+	sysctl_net_route_setup(&clog, PF_OROUTE, "ortable");
+}
+ 
+void
+rtsock_50_fini(void)
+{  
+
+	sysctl_teardown(&clog);
+	MODULE_HOOK_UNSET(rtsock_iflist_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_oifmsg_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_missmsg_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_ifmsg_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_addrmsg_rt_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_addrmsg_src_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_addrmsg_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_ifannouncemsg_50_hook); 
+	MODULE_HOOK_UNSET(rtsock_rt_ieee80211msg_50_hook); 
+}

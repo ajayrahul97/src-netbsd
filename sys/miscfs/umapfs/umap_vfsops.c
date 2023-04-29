@@ -1,4 +1,4 @@
-/*	$NetBSD: umap_vfsops.c,v 1.95 2014/11/09 18:08:07 maxv Exp $	*/
+/*	$NetBSD: umap_vfsops.c,v 1.100 2019/02/20 10:06:00 hannken Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -41,7 +41,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: umap_vfsops.c,v 1.95 2014/11/09 18:08:07 maxv Exp $");
+__KERNEL_RCSID(0, "$NetBSD: umap_vfsops.c,v 1.100 2019/02/20 10:06:00 hannken Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -145,9 +145,6 @@ umapfs_mount(struct mount *mp, const char *path, void *data, size_t *data_len)
 
 	amp = kmem_zalloc(sizeof(struct umap_mount), KM_SLEEP);
 	mp->mnt_data = amp;
-	amp->umapm_vfs = lowerrootvp->v_mount;
-	if (amp->umapm_vfs->mnt_flag & MNT_LOCAL)
-		mp->mnt_flag |= MNT_LOCAL;
 
 	/*
 	 * Now copy in the number of entries and maps for umap mapping.
@@ -194,6 +191,8 @@ umapfs_mount(struct mount *mp, const char *path, void *data, size_t *data_len)
 	 * that the node create call will work.
 	 */
 	vfs_getnewfsid(mp);
+	mp->mnt_lower = lowerrootvp->v_mount;
+
 	amp->umapm_size = sizeof(struct umap_node);
 	amp->umapm_tag = VT_UMAP;
 	amp->umapm_bypass = umap_bypass;
@@ -224,11 +223,16 @@ umapfs_mount(struct mount *mp, const char *path, void *data, size_t *data_len)
 
 	error = set_statvfs_info(path, UIO_USERSPACE, args->umap_target,
 	    UIO_USERSPACE, mp->mnt_op->vfs_name, mp, l);
+	if (error)
+		return error;
+
+	if (mp->mnt_lower->mnt_flag & MNT_LOCAL)
+		mp->mnt_flag |= MNT_LOCAL;
 #ifdef UMAPFS_DIAGNOSTIC
 	printf("umapfs_mount: lower %s, alias at %s\n",
 		mp->mnt_stat.f_mntfromname, mp->mnt_stat.f_mntonname);
 #endif
-	return error;
+	return 0;
 }
 
 /*
@@ -294,7 +298,7 @@ struct vfsops umapfs_vfsops = {
 	.vfs_done = layerfs_done,
 	.vfs_snapshot = layerfs_snapshot,
 	.vfs_extattrctl = vfs_stdextattrctl,
-	.vfs_suspendctl = (void *)eopnotsupp,
+	.vfs_suspendctl = layerfs_suspendctl,
 	.vfs_renamelock_enter = layerfs_renamelock_enter,
 	.vfs_renamelock_exit = layerfs_renamelock_exit,
 	.vfs_fsync = (void *)eopnotsupp,

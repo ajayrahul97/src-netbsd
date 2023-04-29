@@ -1,4 +1,4 @@
-/*	$NetBSD: if_tr_pcmcia.c,v 1.26 2016/07/11 11:31:51 msaitoh Exp $	*/
+/*	$NetBSD: if_tr_pcmcia.c,v 1.28.4.1 2019/11/14 15:38:02 martin Exp $	*/
 
 /*
  * Copyright (c) 2000 Soren S. Jorvang.  All rights reserved.
@@ -35,7 +35,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_tr_pcmcia.c,v 1.26 2016/07/11 11:31:51 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_tr_pcmcia.c,v 1.28.4.1 2019/11/14 15:38:02 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -124,6 +124,7 @@ tr_pcmcia_attach(device_t parent, device_t self, void *aux)
 	bus_size_t offset;
 
 	psc->sc_pf = pa->pf;
+	sc->sc_dev = self;
 
 	cfe = SIMPLEQ_FIRST(&pa->pf->cfe_head);
 
@@ -149,22 +150,22 @@ tr_pcmcia_attach(device_t parent, device_t self, void *aux)
 		aprint_error_dev(self, "can't allocate sram space\n");
 		goto fail3;
 	}
-        if (pcmcia_mem_map(psc->sc_pf, PCMCIA_MEM_COMMON, TR_PCMCIA_SRAM_ADDR,
+	if (pcmcia_mem_map(psc->sc_pf, PCMCIA_MEM_COMMON, TR_PCMCIA_SRAM_ADDR,
 	    TR_SRAM_SIZE, &psc->sc_sramh, &offset, &psc->sc_sram_window) != 0) {
 		aprint_error_dev(self, "can't map sram space\n");
 		goto fail4;
-        }
+	}
 
 	if (pcmcia_mem_alloc(psc->sc_pf, TR_MMIO_SIZE, &psc->sc_mmioh) != 0) {
 		aprint_error_dev(self, "can't allocate mmio space\n");
 		goto fail5;
 		return;
 	}
-        if (pcmcia_mem_map(psc->sc_pf, PCMCIA_MEM_COMMON, TR_PCMCIA_MMIO_ADDR,
+	if (pcmcia_mem_map(psc->sc_pf, PCMCIA_MEM_COMMON, TR_PCMCIA_MMIO_ADDR,
 	    TR_MMIO_SIZE, &psc->sc_mmioh, &offset, &psc->sc_mmio_window) != 0) {
 		aprint_error_dev(self, "can't map mmio space\n");
 		goto fail6;
-        }
+	}
 
 	sc->sc_piot = psc->sc_pioh.iot;
 	sc->sc_pioh = psc->sc_pioh.ioh;
@@ -218,7 +219,7 @@ tr_pcmcia_enable(struct tr_softc *sc)
 		return 1;
 	}
 
-        ret = pcmcia_function_enable(psc->sc_pf);
+	ret = pcmcia_function_enable(psc->sc_pf);
 	if (ret != 0)
 		return ret;
 

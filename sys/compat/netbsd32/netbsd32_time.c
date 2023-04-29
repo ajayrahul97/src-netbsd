@@ -1,4 +1,4 @@
-/*	$NetBSD: netbsd32_time.c,v 1.46 2015/10/31 17:04:39 njoly Exp $	*/
+/*	$NetBSD: netbsd32_time.c,v 1.51 2019/01/27 02:08:40 pgoyette Exp $	*/
 
 /*
  * Copyright (c) 1998, 2001 Matthew R. Green
@@ -27,7 +27,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: netbsd32_time.c,v 1.46 2015/10/31 17:04:39 njoly Exp $");
+__KERNEL_RCSID(0, "$NetBSD: netbsd32_time.c,v 1.51 2019/01/27 02:08:40 pgoyette Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_ntp.h"
@@ -45,6 +45,7 @@ __KERNEL_RCSID(0, "$NetBSD: netbsd32_time.c,v 1.46 2015/10/31 17:04:39 njoly Exp
 #include <sys/resourcevar.h>
 #include <sys/dirent.h>
 #include <sys/kauth.h>
+#include <sys/compat_stub.h>
 
 #include <compat/netbsd32/netbsd32.h>
 #include <compat/netbsd32/netbsd32_syscallargs.h>
@@ -53,7 +54,7 @@ __KERNEL_RCSID(0, "$NetBSD: netbsd32_time.c,v 1.46 2015/10/31 17:04:39 njoly Exp
 #ifdef NTP
 
 int
-netbsd32___ntp_gettime50(struct lwp *l, 
+netbsd32___ntp_gettime50(struct lwp *l,
     const struct netbsd32___ntp_gettime50_args *uap, register_t *retval)
 {
 	/* {
@@ -63,9 +64,13 @@ netbsd32___ntp_gettime50(struct lwp *l,
 	struct ntptimeval ntv;
 	int error = 0;
 
-	if (SCARG_P32(uap, ntvp)) {
-		ntp_gettime(&ntv);
+	if (vec_ntp_gettime == NULL)
+		return EINVAL;
 
+	if (SCARG_P32(uap, ntvp)) {
+		(*vec_ntp_gettime)(&ntv);
+
+		memset(&ntv32, 0, sizeof(ntv32));
 		ntv32.time.tv_sec = ntv.time.tv_sec;
 		ntv32.time.tv_nsec = ntv.time.tv_nsec;
 		ntv32.maxerror = (netbsd32_long)ntv.maxerror;
@@ -75,70 +80,11 @@ netbsd32___ntp_gettime50(struct lwp *l,
 		error = copyout(&ntv32, SCARG_P32(uap, ntvp), sizeof(ntv32));
 	}
 	if (!error) {
-		*retval = ntp_timestatus();
+		*retval = (*vec_ntp_timestatus)();
 	}
 
 	return (error);
 }
-
-#ifdef COMPAT_50
-int
-compat_50_netbsd32_ntp_gettime(struct lwp *l, 
-    const struct compat_50_netbsd32_ntp_gettime_args *uap, register_t *retval)
-{
-	/* {
-		syscallarg(netbsd32_ntptimeval50p_t) ntvp;
-	} */
-	struct netbsd32_ntptimeval50 ntv32;
-	struct ntptimeval ntv;
-	int error = 0;
-
-	if (SCARG_P32(uap, ntvp)) {
-		ntp_gettime(&ntv);
-
-		ntv32.time.tv_sec = (int32_t)ntv.time.tv_sec;
-		ntv32.time.tv_nsec = ntv.time.tv_nsec;
-		ntv32.maxerror = (netbsd32_long)ntv.maxerror;
-		ntv32.esterror = (netbsd32_long)ntv.esterror;
-		ntv32.tai = (netbsd32_long)ntv.tai;
-		ntv32.time_state = ntv.time_state;
-		error = copyout(&ntv32, SCARG_P32(uap, ntvp), sizeof(ntv32));
-	}
-	if (!error) {
-		*retval = ntp_timestatus();
-	}
-
-	return (error);
-}
-#endif
-
-#ifdef COMPAT_30
-int
-compat_30_netbsd32_ntp_gettime(struct lwp *l, const struct compat_30_netbsd32_ntp_gettime_args *uap, register_t *retval)
-{
-	/* {
-		syscallarg(netbsd32_ntptimevalp_t) ntvp;
-	} */
-	struct netbsd32_ntptimeval30 ntv32;
-	struct ntptimeval ntv;
-	int error = 0;
-
-	if (SCARG_P32(uap, ntvp)) {
-		ntp_gettime(&ntv);
-
-		ntv32.time.tv_sec = ntv.time.tv_sec;
-		ntv32.time.tv_usec = ntv.time.tv_nsec / 1000;
-		ntv32.maxerror = (netbsd32_long)ntv.maxerror;
-		ntv32.esterror = (netbsd32_long)ntv.esterror;
-		error = copyout(&ntv32, SCARG_P32(uap, ntvp), sizeof(ntv32));
-	}
-	if (!error) {
-		*retval = ntp_timestatus();
-	}
-
-	return (error);
-}
-#endif
 
 int
 netbsd32_ntp_adjtime(struct lwp *l, const struct netbsd32_ntp_adjtime_args *uap, register_t *retval)
@@ -150,6 +96,9 @@ netbsd32_ntp_adjtime(struct lwp *l, const struct netbsd32_ntp_adjtime_args *uap,
 	struct timex ntv;
 	int error = 0;
 	int modes;
+
+	if (vec_ntp_adjtime1 == NULL)
+		return EINVAL;
 
 	if ((error = copyin(SCARG_P32(uap, tp), &ntv32, sizeof(ntv32))))
 		return (error);
@@ -167,12 +116,12 @@ netbsd32_ntp_adjtime(struct lwp *l, const struct netbsd32_ntp_adjtime_args *uap,
 	    NULL)))
 		return (error);
 
-	ntp_adjtime1(&ntv);
+	(*vec_ntp_adjtime1)(&ntv);
 
 	netbsd32_from_timex(&ntv, &ntv32);
 	error = copyout(&ntv32, SCARG_P32(uap, tp), sizeof(ntv32));
 	if (!error) {
-		*retval = ntp_timestatus();
+		*retval = (*vec_ntp_timestatus)();
 	}
 	return error;
 }
@@ -327,7 +276,7 @@ netbsd32___adjtime50(struct lwp *l, const struct netbsd32___adjtime50_args *uap,
 		if (error)
 			return (error);
 	}
-	
+
 	if (SCARG_P32(uap, delta)) {
 		error = copyin(SCARG_P32(uap, delta), &atv, sizeof(atv));
 		if (error)
@@ -453,7 +402,8 @@ netbsd32_clock_nanosleep(struct lwp *l, const struct netbsd32_clock_nanosleep_ar
 		goto out;
 
 	netbsd32_from_timespec(&rmt, &ts32);
-	if ((error1 = copyout(&ts32, SCARG_P32(uap, rmtp), sizeof(ts32))) != 0)
+	if ((SCARG(uap, flags) & TIMER_ABSTIME) == 0 &&
+	    (error1 = copyout(&ts32, SCARG_P32(uap, rmtp), sizeof(ts32))) != 0)
 		error = error1;
 out:
 	*retval = error;
@@ -566,3 +516,34 @@ netbsd32_timer_getoverrun(struct lwp *l, const struct netbsd32_timer_getoverrun_
 	NETBSD32TO64_UAP(timerid);
 	return sys_timer_getoverrun(l, (void *)&ua, retval);
 }
+
+int
+netbsd32_clock_getcpuclockid2(struct lwp *l,
+    const struct netbsd32_clock_getcpuclockid2_args *uap,
+    register_t *retval)
+{
+	/* {
+		syscallarg(idtype_t) idtype;
+		syscallarg(id_t) id;
+		syscallarg(netbsd32_clockidp_t) clock_id;
+	} */
+	pid_t pid;
+	lwpid_t lid;
+	clockid_t clock_id;
+	id_t id = SCARG(uap, id);
+
+	switch (SCARG(uap, idtype)) {
+	case P_PID:
+		pid = id == 0 ? l->l_proc->p_pid : id;
+		clock_id = CLOCK_PROCESS_CPUTIME_ID | pid;
+		break;
+	case P_LWPID:
+		lid = id == 0 ? l->l_lid : id;
+		clock_id = CLOCK_THREAD_CPUTIME_ID | lid;
+		break;
+	default:
+		return EINVAL;
+	}
+	return copyout(&clock_id, SCARG_P32(uap, clock_id), sizeof(clock_id));
+}
+

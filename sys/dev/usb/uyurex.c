@@ -1,4 +1,4 @@
-/*	$NetBSD: uyurex.c,v 1.11 2016/04/23 10:15:32 skrll Exp $ */
+/*	$NetBSD: uyurex.c,v 1.16 2019/05/05 03:17:54 mrg Exp $ */
 /*	$OpenBSD: uyurex.c,v 1.3 2010/03/04 03:47:22 deraadt Exp $ */
 
 /*
@@ -22,7 +22,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: uyurex.c,v 1.11 2016/04/23 10:15:32 skrll Exp $");
+__KERNEL_RCSID(0, "$NetBSD: uyurex.c,v 1.16 2019/05/05 03:17:54 mrg Exp $");
+
+#ifdef _KERNEL_OPT
+#include "opt_usb.h"
+#endif
 
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -41,7 +45,7 @@ __KERNEL_RCSID(0, "$NetBSD: uyurex.c,v 1.11 2016/04/23 10:15:32 skrll Exp $");
 #include <dev/usb/usbdi_util.h>
 #include <dev/usb/usbdevs.h>
 #include <dev/usb/uhidev.h>
-#include <dev/usb/hid.h>
+#include <dev/hid/hid.h>
 
 #define	CMD_NONE	0xf0
 #define CMD_EOF		0x0d
@@ -109,7 +113,7 @@ void uyurex_intr(struct uhidev *, void *, u_int);
 static void uyurex_refresh(struct sysmon_envsys *, envsys_data_t *);
 static void uyurex_delta(void *);
 
-extern struct cfdriver uyurex_cd;
+
 CFATTACH_DECL_NEW(uyurex, sizeof(struct uyurex_softc),
     uyurex_match, uyurex_attach, uyurex_detach, uyurex_activate);
 
@@ -121,7 +125,7 @@ uyurex_match(device_t parent, cfdata_t match, void *aux)
 	if (uyurex_lookup(uha->uiaa->uiaa_vendor, uha->uiaa->uiaa_product) == NULL)
 		return UMATCH_NONE;
 
-	return (UMATCH_VENDOR_PRODUCT);
+	return UMATCH_VENDOR_PRODUCT;
 }
 
 void
@@ -220,7 +224,7 @@ uyurex_detach(device_t self, int flags)
 	usbd_add_drv_event(USB_EVENT_DRIVER_DETACH, sc->sc_udev,
 	    sc->sc_hdev.sc_dev);
 
-	return (rv);
+	return rv;
 }
 
 int
@@ -233,7 +237,7 @@ uyurex_activate(device_t self, enum devact act)
 		sc->sc_dying = 1;
 		break;
 	}
-	return (0);
+	return 0;
 }
 
 void
@@ -337,7 +341,7 @@ uyurex_set_mode(struct uyurex_softc *sc, uint8_t val)
 	}
 
 	/* wait ack */
-	tsleep(&sc->sc_sme, 0, "uyurex", (1000*hz+999)/1000 + 1);
+	kpause("uyurexsm", false, (1000*hz+999)/1000 + 1, NULL);
 }
 
 void
@@ -355,7 +359,7 @@ uyurex_read_value_request(struct uyurex_softc *sc)
 		return;
 
 	/* wait till sensor data are updated, 500ms will be enough */
-	tsleep(&sc->sc_sme, 0, "uyurex", (500*hz+999)/1000 + 1);
+	kpause("uyurexrd", false, (500*hz+999)/1000 + 1, NULL);
 }
 
 void
@@ -378,5 +382,5 @@ uyurex_write_value_request(struct uyurex_softc *sc, uint32_t val)
 		return;
 
 	/* wait till sensor data are updated, 250ms will be enough */
-	tsleep(&sc->sc_sme, 0, "uyurex", (250*hz+999)/1000 + 1);
+	kpause("uyurexwr", false, (250*hz+999)/1000 + 1, NULL);
 }

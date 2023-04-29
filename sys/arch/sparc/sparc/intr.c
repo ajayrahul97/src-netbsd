@@ -1,4 +1,4 @@
-/*	$NetBSD: intr.c,v 1.118 2013/11/16 23:54:01 mrg Exp $ */
+/*	$NetBSD: intr.c,v 1.121 2019/03/01 02:33:55 macallan Exp $ */
 
 /*
  * Copyright (c) 1992, 1993
@@ -41,10 +41,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: intr.c,v 1.118 2013/11/16 23:54:01 mrg Exp $");
+__KERNEL_RCSID(0, "$NetBSD: intr.c,v 1.121 2019/03/01 02:33:55 macallan Exp $");
 
 #include "opt_multiprocessor.h"
 #include "opt_sparc_arch.h"
+#include "sx.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -70,11 +71,18 @@ __KERNEL_RCSID(0, "$NetBSD: intr.c,v 1.118 2013/11/16 23:54:01 mrg Exp $");
 #include <machine/db_machdep.h>
 #endif
 
+#if NSX > 0
+#include <sys/bus.h>
+#include <sparc/dev/sxvar.h>
+#endif
+
 #if defined(MULTIPROCESSOR)
 static int intr_biglock_wrapper(void *);
 
 void *xcall_cookie;
 #endif
+
+extern kmutex_t xpmsg_mutex;
 
 void	strayintr(struct clockframe *);
 #ifdef DIAGNOSTIC
@@ -241,7 +249,7 @@ nmi_hard(void)
 			DELAY(1);
 			if (n-- > 0)
 				continue;
-			printf("nmi_hard: SMP botch.");
+			printf("nmi_hard: SMP botch.\n");
 			break;
 		}
 	}
@@ -253,7 +261,10 @@ nmi_hard(void)
 	si = *((uint32_t *)ICR_SI_PEND);
 	snprintb(bits, sizeof(bits), SINTR_BITS, si);
 	printf("cpu%d: NMI: system interrupts: %s\n", cpu_number(), bits);
-		
+
+#if NSX > 0
+	sx_dump();
+#endif
 
 	if ((si & SINTR_M) != 0) {
 		/* ECC memory error */
@@ -363,6 +374,31 @@ xcallintr(void *v)
 	/* Tally */
 	if (v != xcallintr)
 		cpuinfo.ci_sintrcnt[13].ev_count++;
+
+	/*
+	 * This happens when the remote CPU is slow at responding and the
+	 * caller gave up, and has given up the mutex.
+	 */
+	if (mutex_owned(&xpmsg_mutex) == 0) {
+		cpuinfo.ci_xpmsg_mutex_not_held.ev_count++;
+#ifdef DEBUG
+		printf("%s: cpu%d mutex not held\n", __func__, cpu_number());
+#endif
+		cpuinfo.msg.complete = 1;
+		kpreempt_enable();
+		return;
+	}
+
+	if (cpuinfo.msg.complete != 0) {
+		cpuinfo.ci_xpmsg_bogus.ev_count++;
+#ifdef DEBUG
+		volatile struct xpmsg_func *p = &cpuinfo.msg.u.xpmsg_func;
+		printf("%s: bogus message %08x %08x %08x %08x\n", __func__,
+		    cpuinfo.msg.tag, (uint32_t)p->func, p->arg0, p->arg1);
+#endif
+		kpreempt_enable();
+		return;
+	}
 
 	/* notyet - cpuinfo.msg.received = 1; */
 	switch (cpuinfo.msg.tag) {

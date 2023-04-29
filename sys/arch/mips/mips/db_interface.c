@@ -1,4 +1,4 @@
-/*	$NetBSD: db_interface.c,v 1.79 2016/07/11 16:15:36 matt Exp $	*/
+/*	$NetBSD: db_interface.c,v 1.82 2019/04/06 03:06:26 thorpej Exp $	*/
 
 /*
  * Mach Operating System
@@ -27,7 +27,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: db_interface.c,v 1.79 2016/07/11 16:15:36 matt Exp $");
+__KERNEL_RCSID(0, "$NetBSD: db_interface.c,v 1.82 2019/04/06 03:06:26 thorpej Exp $");
 
 #include "opt_multiprocessor.h"
 #include "opt_cputype.h"	/* which mips CPUs do we support? */
@@ -96,13 +96,14 @@ paddr_t kvtophys(vaddr_t);
 CTASSERT(sizeof(ddb_regs) == sizeof(struct reg));
 
 #ifdef DDB_TRACE
-int
-kdbpeek(vaddr_t addr)
+bool
+kdbpeek(vaddr_t addr, int *valp)
 {
 
 	if (addr == 0 || (addr & 3))
-		return 0;
-	return *(int *)addr;
+		return false;
+	*valp = *(int *)addr;
+	return true;
 }
 #endif
 
@@ -295,7 +296,7 @@ db_kvtophys_cmd(db_expr_t addr, bool have_addr, db_expr_t count,
 		db_printf("0x%" DDB_EXPR_FMT "x -> 0x%" PRIx64 "\n", addr,
 		    (uint64_t) kvtophys(addr));
 	} else
-		printf("not a kernel virtual address\n");
+		db_printf("not a kernel virtual address\n");
 }
 
 #define	FLDWIDTH	10
@@ -313,8 +314,8 @@ do {									\
 		"mfc0 %0,$%1,%2			\n\t"			\
 		".set pop			\n\t"			\
 	    : "=r"(__val) : "n"(num), "n"(sel));			\
-	printf("  %s:%*s %#x\n", name, FLDWIDTH - (int) strlen(name),	\
-	    "", __val);							\
+	db_printf("  %s:%*s %#x\n", name,				\
+	    FLDWIDTH - (int) strlen(name), "", __val);			\
 } while (0)
 
 /* XXX not 64-bit ABI safe! */
@@ -330,8 +331,8 @@ do {									\
 		"dmfc0 %0,$%1,%2		\n\t"			\
 		".set pop"						\
 	    : "=r"(__val) : "n"(num), "n"(sel));			\
-	printf("  %s:%*s %#"PRIx64"\n", name, FLDWIDTH - (int) strlen(name), \
-	    "", __val);							\
+	db_printf("  %s:%*s %#"PRIx64"\n", name,			\
+	    FLDWIDTH - (int) strlen(name), "", __val);			\
 } while (0)
 
 #define	SET32(reg, name, val)						\
@@ -339,7 +340,7 @@ do {									\
 									\
 	__asm volatile("mtc0 %0,$" ___STRING(reg) :: "r"(val));		\
 	if (name != NULL)						\
-		printf("  %s =%*s %#x\n", name,				\
+		db_printf("  %s =%*s %#x\n", name,			\
 		    FLDWIDTH - (int) strlen(name), "", val);		\
 } while (0)
 
@@ -355,7 +356,7 @@ do {									\
 		".set pop			\n\t"			\
 	    :: "r"(val), "n"(num), "n"(sel));				\
 	if (name != NULL)						\
-		printf("  %s =%*s %#x\n", name,				\
+		db_printf("  %s =%*s %#x\n", name,			\
 		    FLDWIDTH - (int) strlen(name), "", val);		\
 } while (0)
 
@@ -372,7 +373,7 @@ do {									\
 		".set pop"						\
 	    :: "r"(val), "n"(num), "n"(sel));				\
 	if (name != NULL)						\
-		printf("  %s =%*s %#"PRIx64"\n", name,			\
+		db_printf("  %s =%*s %#"PRIx64"\n", name,		\
 		    FLDWIDTH - (int) strlen(name), "", (uint64_t)val);	\
 } while (0)
 
@@ -476,7 +477,7 @@ db_cp0dump_cmd(db_expr_t addr, bool have_addr, db_expr_t count,
 			uint32_t val;
 
 			val = mipsNN_cp0_config1_read();
-			printf("  config1:    %#x\n", val);
+			db_printf("  config1:    %#x\n", val);
 		}
 #endif
 	}
@@ -494,9 +495,9 @@ db_cp0dump_cmd(db_expr_t addr, bool have_addr, db_expr_t count,
 	for (int i=0; i < curcpu()->ci_cpuwatch_count; i++) {
 		const intptr_t lo = mipsNN_cp0_watchlo_read(i);
 		const uint32_t hi = mipsNN_cp0_watchhi_read(i);
-		printf("  %s%d:%*s %#" PRIxPTR "\t",
+		db_printf("  %s%d:%*s %#" PRIxPTR "\t",
 		    "watchlo", i, FLDWIDTH - 8, "", lo);
-		printf("  %s%d:%*s %#" PRIx32 "\n",
+		db_printf("  %s%d:%*s %#" PRIx32 "\n",
 		    "watchhi", i, FLDWIDTH - 8, "", hi);
 	}
 #endif
@@ -979,15 +980,15 @@ branch_taken(int inst, db_addr_t pc, db_regs_t *regs)
 db_addr_t
 next_instr_address(db_addr_t pc, bool bd)
 {
-	unsigned ins;
+	uint32_t ins;
 
 	if (bd == false)
 		return (pc + 4);
 	
 	if (pc < MIPS_KSEG0_START)
-		ins = ufetch_uint32((void *)pc);
+		ins = mips_ufetch32((void *)pc);
 	else
-		ins = *(unsigned *)pc;
+		ins = *(uint32_t *)pc;
 
 	if (inst_branch(ins) || inst_call(ins) || inst_return(ins))
 		return (pc + 4);

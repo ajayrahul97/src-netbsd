@@ -1,4 +1,4 @@
-/*	$NetBSD: intelfb.c,v 1.13 2015/04/04 15:12:39 jmcneill Exp $	*/
+/*	$NetBSD: intelfb.c,v 1.16.4.1 2019/08/18 09:57:40 martin Exp $	*/
 
 /*-
  * Copyright (c) 2014 The NetBSD Foundation, Inc.
@@ -30,7 +30,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: intelfb.c,v 1.13 2015/04/04 15:12:39 jmcneill Exp $");
+__KERNEL_RCSID(0, "$NetBSD: intelfb.c,v 1.16.4.1 2019/08/18 09:57:40 martin Exp $");
 
 #include <sys/types.h>
 #include <sys/bus.h>
@@ -42,6 +42,7 @@ __KERNEL_RCSID(0, "$NetBSD: intelfb.c,v 1.13 2015/04/04 15:12:39 jmcneill Exp $"
 
 #include "i915_drv.h"
 #include "i915_pci.h"
+#include "intel_drv.h"
 #include "intelfb.h"
 
 static int	intelfb_match(device_t, cfdata_t, void *);
@@ -118,6 +119,7 @@ intelfb_attach(device_t parent, device_t self, void *aux)
 		    error);
 		goto fail1;
 	}
+	self->dv_flags |= DVF_ATTACH_INPROGRESS;
 	sc->sc_scheduled = true;
 
 	/* Success!  */
@@ -169,6 +171,7 @@ intelfb_attach_task(struct i915drmkms_task *task)
 		.da_fb_helper = ifa->ifa_fb_helper,
 		.da_fb_sizes = &ifa->ifa_fb_sizes,
 		.da_fb_vaddr = bus_space_vaddr(ifa->ifa_fb_bst, sc->sc_fb_bsh),
+		.da_fb_linebytes = ifa->ifa_fb_helper->fb->pitches[0],
 		.da_params = &intelfb_drmfb_params,
 	};
 	int error;
@@ -177,7 +180,7 @@ intelfb_attach_task(struct i915drmkms_task *task)
 	if (error) {
 		aprint_error_dev(sc->sc_dev, "failed to attach drmfb: %d\n",
 		    error);
-		return;
+		goto out;
 	}
 
 	if (!pmf_device_register1(sc->sc_dev, NULL, NULL, &intelfb_shutdown))
@@ -185,6 +188,8 @@ intelfb_attach_task(struct i915drmkms_task *task)
 		    "failed to register shutdown handler\n");
 
 	sc->sc_attached = true;
+out:
+	sc->sc_dev->dv_flags &= ~DVF_ATTACH_INPROGRESS;
 }
 
 static bool

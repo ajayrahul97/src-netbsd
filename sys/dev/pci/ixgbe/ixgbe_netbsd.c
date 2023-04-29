@@ -1,4 +1,4 @@
-/* $NetBSD: ixgbe_netbsd.c,v 1.3 2015/02/04 09:05:53 msaitoh Exp $ */
+/* $NetBSD: ixgbe_netbsd.c,v 1.9.4.2 2020/01/26 11:03:17 martin Exp $ */
 /*
  * Copyright (c) 2011 The NetBSD Foundation, Inc.
  * All rights reserved.
@@ -38,8 +38,9 @@
 #include <sys/mutex.h>
 #include <sys/queue.h>
 #include <sys/workqueue.h>
+#include <dev/pci/pcivar.h>
 
-#include "ixgbe_netbsd.h"
+#include "ixgbe.h"
 
 void
 ixgbe_dma_tag_destroy(ixgbe_dma_tag_t *dt)
@@ -56,9 +57,7 @@ ixgbe_dma_tag_create(bus_dma_tag_t dmat, bus_size_t alignment,
 
 	*dtp = NULL;
 
-	if ((dt = kmem_zalloc(sizeof(*dt), KM_SLEEP)) == NULL)
-		return ENOMEM;
-
+	dt = kmem_zalloc(sizeof(*dt), KM_SLEEP);
 	dt->dt_dmat = dmat;
 	dt->dt_alignment = alignment;
 	dt->dt_boundary = boundary;
@@ -138,9 +137,6 @@ ixgbe_newext(ixgbe_extmem_head_t *eh, bus_dma_tag_t dmat, size_t size)
 
 	em = kmem_zalloc(sizeof(*em), KM_SLEEP);
 
-	if (em == NULL)
-		return NULL;
-
 	rc = bus_dmamem_alloc(dmat, size, PAGE_SIZE, 0, &em->em_seg, 1, &nseg,
 	    BUS_DMA_WAITOK);
 
@@ -165,18 +161,12 @@ post_zalloc_err:
 	return NULL;
 }
 
-void
-ixgbe_jcl_reinit(ixgbe_extmem_head_t *eh, bus_dma_tag_t dmat, int nbuf,
-    size_t size)
+static void
+ixgbe_jcl_freeall(struct adapter *adapter, struct rx_ring *rxr)
 {
-	int i;
+	ixgbe_extmem_head_t *eh = &rxr->jcl_head;
 	ixgbe_extmem_t *em;
-
-	if (!eh->eh_initialized) {
-		TAILQ_INIT(&eh->eh_freelist);
-		mutex_init(&eh->eh_mtx, MUTEX_DEFAULT, IPL_NET);
-		eh->eh_initialized = true;
-	}
+	bus_dma_tag_t dmat = rxr->ptag->dt_dmat;
 
 	while ((em = ixgbe_getext(eh, 0)) != NULL) {
 		KASSERT(em->em_vaddr != NULL);
@@ -185,16 +175,65 @@ ixgbe_jcl_reinit(ixgbe_extmem_head_t *eh, bus_dma_tag_t dmat, int nbuf,
 		memset(em, 0, sizeof(*em));
 		kmem_free(em, sizeof(*em));
 	}
+}
+
+void
+ixgbe_jcl_reinit(struct adapter *adapter, bus_dma_tag_t dmat,
+    struct rx_ring *rxr, int nbuf, size_t size)
+{
+	ixgbe_extmem_head_t *eh = &rxr->jcl_head;
+	ixgbe_extmem_t *em;
+	int i;
+
+	if (!eh->eh_initialized) {
+		TAILQ_INIT(&eh->eh_freelist);
+		mutex_init(&eh->eh_mtx, MUTEX_DEFAULT, IPL_NET);
+		eh->eh_initialized = true;
+	}
+
+	/*
+	 *  Check previous parameters. If it's not required to reinit, just
+	 * return.
+	 *
+	 *  Note that the num_rx_desc is currently fixed value. It's never
+	 * changed after device is attached.
+	 */
+	if ((rxr->last_rx_mbuf_sz == rxr->mbuf_sz)
+	    && (rxr->last_num_rx_desc == adapter->num_rx_desc))
+		return;
+
+	/* Free all dmamem */
+	ixgbe_jcl_freeall(adapter, rxr);
 
 	for (i = 0; i < nbuf; i++) {
 		if ((em = ixgbe_newext(eh, dmat, size)) == NULL) {
-			printf("%s: only %d of %d jumbo buffers allocated\n",
+			device_printf(adapter->dev,
+			    "%s: only %d of %d jumbo buffers allocated\n",
 			    __func__, i, nbuf);
 			break;
 		}
 		ixgbe_putext(em);
 	}
+
+	/* Keep current parameters */
+	rxr->last_rx_mbuf_sz = adapter->rx_mbuf_sz;
+	rxr->last_num_rx_desc = adapter->num_rx_desc;
 }
+
+void
+ixgbe_jcl_destroy(struct adapter *adapter, struct rx_ring *rxr)
+{
+	ixgbe_extmem_head_t *eh = &rxr->jcl_head;
+
+	if (eh->eh_initialized) {
+		/* Free all dmamem */
+		ixgbe_jcl_freeall(adapter, rxr);
+
+		mutex_destroy(&eh->eh_mtx);
+		eh->eh_initialized = false;
+	}
+}
+
 
 static void
 ixgbe_jcl_free(struct mbuf *m, void *buf, size_t size, void *arg)
@@ -247,4 +286,32 @@ ixgbe_getjcl(ixgbe_extmem_head_t *eh, int nowait /* M_DONTWAIT */,
 	}
 
 	return m;
+}
+
+void
+ixgbe_pci_enable_busmaster(pci_chipset_tag_t pc, pcitag_t tag)
+{
+	pcireg_t	pci_cmd_word;
+
+	pci_cmd_word = pci_conf_read(pc, tag, PCI_COMMAND_STATUS_REG);
+	if (!(pci_cmd_word & PCI_COMMAND_MASTER_ENABLE)) {
+		pci_cmd_word |= PCI_COMMAND_MASTER_ENABLE;
+		pci_conf_write(pc, tag, PCI_COMMAND_STATUS_REG, pci_cmd_word);
+	}
+}
+
+u_int
+atomic_load_acq_uint(volatile u_int *p)
+{
+	u_int rv;
+
+	rv = *p;
+	/*
+	 * XXX
+	 * membar_sync() is far more than we need on most CPUs;
+	 * we just don't have an MI load-acqure operation.
+	 */
+	membar_sync();
+
+	return rv;
 }

@@ -1,4 +1,4 @@
-/*	$NetBSD: udsbr.c,v 1.24 2016/07/07 06:55:42 msaitoh Exp $	*/
+/*	$NetBSD: udsbr.c,v 1.27 2019/05/05 03:17:54 mrg Exp $	*/
 
 /*
  * Copyright (c) 2002 The NetBSD Foundation, Inc.
@@ -38,7 +38,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: udsbr.c,v 1.24 2016/07/07 06:55:42 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: udsbr.c,v 1.27 2019/05/05 03:17:54 mrg Exp $");
+
+#ifdef _KERNEL_OPT
+#include "opt_usb.h"
+#endif
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -78,7 +82,7 @@ const struct radio_hw_if udsbr_hw_if = {
 };
 
 struct udsbr_softc {
- 	device_t		sc_dev;
+	device_t		sc_dev;
 	struct usbd_device *	sc_udev;
 
 	char			sc_mute;
@@ -102,7 +106,7 @@ void udsbr_attach(device_t, device_t, void *);
 void udsbr_childdet(device_t, device_t);
 int udsbr_detach(device_t, int);
 int udsbr_activate(device_t, enum devact);
-extern struct cfdriver udsbr_cd;
+
 CFATTACH_DECL2_NEW(udsbr, sizeof(struct udsbr_softc), udsbr_match,
     udsbr_attach, udsbr_detach, udsbr_activate, NULL, udsbr_childdet);
 

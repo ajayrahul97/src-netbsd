@@ -1,4 +1,4 @@
-/*	$NetBSD: sys_descrip.c,v 1.30 2014/09/05 09:20:59 matt Exp $	*/
+/*	$NetBSD: sys_descrip.c,v 1.33 2019/05/21 18:09:31 christos Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -67,7 +67,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: sys_descrip.c,v 1.30 2014/09/05 09:20:59 matt Exp $");
+__KERNEL_RCSID(0, "$NetBSD: sys_descrip.c,v 1.33 2019/05/21 18:09:31 christos Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -257,6 +257,7 @@ do_fcntl_lock(int fd, int cmd, struct flock *fl)
 		flg |= F_WAIT;
 		/* Fall into F_SETLK */
 
+		/* FALLTHROUGH */
 	case F_SETLK:
 		switch (fl->l_type) {
 		case F_RDLCK:
@@ -480,16 +481,17 @@ sys_close(struct lwp *l, const struct sys_close_args *uap, register_t *retval)
 		syscallarg(int)	fd;
 	} */
 	int error;
+	int fd = SCARG(uap, fd);
 
-	if (fd_getfile(SCARG(uap, fd)) == NULL) {
+	if (fd_getfile(fd) == NULL) {
 		return EBADF;
 	}
 
-	error = fd_close(SCARG(uap, fd));
+	error = fd_close(fd);
 	if (error == ERESTART) {
 #ifdef DIAGNOSTIC
-		printf("pid %d: close returned ERESTART\n",
-		    (int)l->l_proc->p_pid);
+		printf("%s[%d]: close(%d) returned ERESTART\n",
+		    l->l_proc->p_comm, (int)l->l_proc->p_pid, fd);
 #endif
 		error = EINTR;
 	}
@@ -764,7 +766,15 @@ sys___posix_fadvise50(struct lwp *l,
 int
 sys_pipe(struct lwp *l, const void *v, register_t *retval)
 {
-	return pipe1(l, retval, 0);
+	int fd[2], error;
+
+	if ((error = pipe1(l, fd, 0)) != 0)
+		return error;
+
+	retval[0] = fd[0];
+	retval[1] = fd[1];
+
+	return 0;
 }
 
 int
@@ -776,10 +786,9 @@ sys_pipe2(struct lwp *l, const struct sys_pipe2_args *uap, register_t *retval)
 	} */
 	int fd[2], error;
 
-	if ((error = pipe1(l, retval, SCARG(uap, flags))) != 0)
+	if ((error = pipe1(l, fd, SCARG(uap, flags))) != 0)
 		return error;
-	fd[0] = retval[0];
-	fd[1] = retval[1];
+
 	if ((error = copyout(fd, SCARG(uap, fildes), sizeof(fd))) != 0)
 		return error;
 	retval[0] = 0;

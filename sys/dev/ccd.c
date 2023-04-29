@@ -1,4 +1,4 @@
-/*	$NetBSD: ccd.c,v 1.166 2015/12/08 20:36:14 christos Exp $	*/
+/*	$NetBSD: ccd.c,v 1.179 2019/03/27 19:13:34 martin Exp $	*/
 
 /*-
  * Copyright (c) 1996, 1997, 1998, 1999, 2007, 2009 The NetBSD Foundation, Inc.
@@ -88,11 +88,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ccd.c,v 1.166 2015/12/08 20:36:14 christos Exp $");
-
-#if defined(_KERNEL_OPT)
-#include "opt_compat_netbsd.h"
-#endif
+__KERNEL_RCSID(0, "$NetBSD: ccd.c,v 1.179 2019/03/27 19:13:34 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -119,6 +115,7 @@ __KERNEL_RCSID(0, "$NetBSD: ccd.c,v 1.166 2015/12/08 20:36:14 christos Exp $");
 #include <sys/kthread.h>
 #include <sys/bufq.h>
 #include <sys/sysctl.h>
+#include <sys/compat_stub.h>
 
 #include <uvm/uvm_extern.h>
 
@@ -218,17 +215,17 @@ static	void printiinfo(struct ccdiinfo *);
 
 static LIST_HEAD(, ccd_softc) ccds = LIST_HEAD_INITIALIZER(ccds);
 static kmutex_t ccd_lock;
-static size_t ccd_nactive = 0;
+
+#ifdef _MODULE
+static struct sysctllog *ccd_clog;
+#endif
+
+SYSCTL_SETUP_PROTO(sysctl_kern_ccd_setup);
 
 static struct ccd_softc *
 ccdcreate(int unit) {
 	struct ccd_softc *sc = kmem_zalloc(sizeof(*sc), KM_SLEEP);
-	if (sc == NULL) {
-#ifdef DIAGNOSTIC
-		printf("%s: out of memory\n", __func__);
-#endif
-		return NULL;
-	}
+
 	/* Initialize per-softc structures. */
 	snprintf(sc->sc_xname, sizeof(sc->sc_xname), "ccd%d", unit);
 	sc->sc_unit = unit;
@@ -274,7 +271,6 @@ ccdget(int unit, int make) {
 		return NULL;
 	mutex_enter(&ccd_lock);
 	LIST_INSERT_HEAD(&ccds, sc, sc_link);
-	ccd_nactive++;
 	mutex_exit(&ccd_lock);
 	return sc;
 }
@@ -283,7 +279,6 @@ static void
 ccdput(struct ccd_softc *sc) {
 	mutex_enter(&ccd_lock);
 	LIST_REMOVE(sc, sc_link);
-	ccd_nactive--;
 	mutex_exit(&ccd_lock);
 	ccddestroy(sc);
 }
@@ -809,9 +804,10 @@ ccdstart(struct ccd_softc *cs)
 
 	KASSERT(mutex_owned(cs->sc_iolock));
 
-	disk_busy(&cs->sc_dkdev);
 	bp = bufq_get(cs->sc_bufq);
 	KASSERT(bp != NULL);
+
+	disk_busy(&cs->sc_dkdev);
 
 #ifdef DEBUG
 	if (ccddebug & CCDB_FOLLOW)
@@ -1077,12 +1073,15 @@ ccdwrite(dev_t dev, struct uio *uio, int flags)
 	return (physio(ccdstrategy, NULL, dev, B_WRITE, minphys, uio));
 }
 
+int (*compat_ccd_ioctl_60)(dev_t, u_long, void *, int, struct lwp *,
+    int (*)(dev_t, u_long, void *, int, struct lwp *)) = (void *)enosys;
+
 static int
 ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 {
 	int unit = ccdunit(dev);
 	int i, j, lookedup = 0, error = 0;
-	int part, pmask, make;
+	int part, pmask, make, hook;
 	struct ccd_softc *cs;
 	struct ccd_ioctl *ccio = (struct ccd_ioctl *)data;
 	kauth_cred_t uc;
@@ -1094,14 +1093,17 @@ ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 #endif
 
 	switch (cmd) {
-#if defined(COMPAT_60) && !defined(_LP64)
-	case CCDIOCSET_60:
-#endif
 	case CCDIOCSET:
 		make = 1;
 		break;
 	default:
-		make = 0;
+		MODULE_HOOK_CALL(ccd_ioctl_60_hook,
+				 (0, cmd, NULL, 0, NULL, NULL),
+				 enosys(), hook);
+		if (hook == 0)
+			make = 1;
+		else
+			make = 0;
 		break;
 	}
 
@@ -1109,45 +1111,11 @@ ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 		return ENOENT;
 	uc = kauth_cred_get();
 
-/*
- * Compat code must not be called if on a platform where
- * sizeof (size_t) == sizeof (uint64_t) as CCDIOCSET will
- * be the same as CCDIOCSET_60
- */
-#if defined(COMPAT_60) && !defined(_LP64)
-	switch (cmd) {
-	case CCDIOCSET_60: {
-		struct ccd_ioctl ccionew;
-       		struct ccd_ioctl_60 *ccio60 =
-       		    (struct ccd_ioctl_60 *)data;
-		ccionew.ccio_disks = ccio->ccio_disks;
-		ccionew.ccio_ndisks = ccio->ccio_ndisks;
-		ccionew.ccio_ileave = ccio->ccio_ileave;
-		ccionew.ccio_flags = ccio->ccio_flags;
-		ccionew.ccio_unit = ccio->ccio_unit;
-		error = ccdioctl(dev, CCDIOCSET, &ccionew, flag, l);
-		if (!error) {
-			/* Copy data back, adjust types if necessary */
-			ccio60->ccio_disks = ccionew.ccio_disks;
-			ccio60->ccio_ndisks = ccionew.ccio_ndisks;
-			ccio60->ccio_ileave = ccionew.ccio_ileave;
-			ccio60->ccio_flags = ccionew.ccio_flags;
-			ccio60->ccio_unit = ccionew.ccio_unit;
-			ccio60->ccio_size = (size_t)ccionew.ccio_size;
-		}
+	MODULE_HOOK_CALL(ccd_ioctl_60_hook,
+			 (dev, cmd, data, flag, l, ccdioctl),
+			 enosys(), error);
+	if (error != ENOSYS)
 		return error;
-		}
-		break;
-
-	case CCDIOCCLR_60:
-		/*
-		 * ccio_size member not used, so existing struct OK
-		 * drop through to existing non-compat version
-		 */
-		cmd = CCDIOCCLR;
-		break;
-	}
-#endif /* COMPAT_60 && !_LP64*/
 
 	/* Must be open for writes for these commands... */
 	switch (cmd) {
@@ -1158,6 +1126,7 @@ ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 	case DIOCCACHESYNC:
 	case DIOCAWEDGE:
 	case DIOCDWEDGE:
+	case DIOCRMWEDGES:
 	case DIOCMWEDGES:
 #ifdef __HAVE_OLD_DISKLABEL
 	case ODIOCSDINFO:
@@ -1175,6 +1144,8 @@ ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 	switch (cmd) {
 	case CCDIOCCLR:
 	case DIOCGDINFO:
+	case DIOCGSTRATEGY:
+	case DIOCGCACHE:
 	case DIOCCACHESYNC:
 	case DIOCAWEDGE:
 	case DIOCDWEDGE:
@@ -1285,8 +1256,9 @@ ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 			kmem_free(vpp, ccio->ccio_ndisks * sizeof(*vpp));
 			kmem_free(cpp, ccio->ccio_ndisks * sizeof(*cpp));
 			disk_detach(&cs->sc_dkdev);
+			mutex_exit(&cs->sc_dvlock);
 			bufq_free(cs->sc_bufq);
-			goto out;
+			return error;
 		}
 
 		/* We can free the temporary variables now. */
@@ -1384,6 +1356,50 @@ ccdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 		ccdput(cs);
 		/* Don't break, otherwise cs is read again. */
 		return 0;
+
+	case DIOCGSTRATEGY:
+	    {
+		struct disk_strategy *dks = (void *)data;
+
+		mutex_enter(cs->sc_iolock);
+		if (cs->sc_bufq != NULL)
+			strlcpy(dks->dks_name,
+			    bufq_getstrategyname(cs->sc_bufq),
+			    sizeof(dks->dks_name));
+		else
+			error = EINVAL;
+		mutex_exit(cs->sc_iolock);
+		dks->dks_paramlen = 0;
+		break;
+	    }
+
+	case DIOCGCACHE:
+	    {
+		int dkcache = 0;
+
+		/*
+		 * We pass this call down to all components and report
+		 * intersection of the flags returned by the components.
+		 * If any errors out, we return error. CCD components
+		 * can not change unless the device is unconfigured, so
+		 * device feature flags will remain static. RCE/WCE can change
+		 * of course, if set directly on underlying device.
+		 */
+		for (error = 0, i = 0; i < cs->sc_nccdisks; i++) {
+			error = VOP_IOCTL(cs->sc_cinfo[i].ci_vp, cmd, &j,
+				      flag, uc);
+			if (error)
+				break;
+
+			if (i == 0)
+				dkcache = j;
+			else
+				dkcache = DKCACHE_COMBINE(dkcache, j);
+		}
+
+		*((int *)data) = dkcache;
+		break;
+	    }
 
 	case DIOCCACHESYNC:
 		/*
@@ -1647,7 +1663,7 @@ printiinfo(struct ccdiinfo *ii)
 }
 #endif
 
-MODULE(MODULE_CLASS_DRIVER, ccd, "dk_subr");
+MODULE(MODULE_CLASS_DRIVER, ccd, "dk_subr,bufq_fcfs");
 
 static int
 ccd_modcmd(modcmd_t cmd, void *arg)
@@ -1665,13 +1681,14 @@ ccd_modcmd(modcmd_t cmd, void *arg)
 
 		error = devsw_attach("ccd", &ccd_bdevsw, &bmajor,
 		    &ccd_cdevsw, &cmajor);
+		sysctl_kern_ccd_setup(&ccd_clog);
 #endif
 		break;
 
 	case MODULE_CMD_FINI:
 #ifdef _MODULE
 		mutex_enter(&ccd_lock);
-		if (ccd_nactive) {
+		if (!LIST_EMPTY(&ccds)) {
 			mutex_exit(&ccd_lock);
 			error = EBUSY;
 		} else {
@@ -1679,6 +1696,7 @@ ccd_modcmd(modcmd_t cmd, void *arg)
 			error = devsw_detach(&ccd_bdevsw, &ccd_cdevsw);
 			ccddetach();
 		}
+		sysctl_teardown(&ccd_clog);
 #endif
 		break;
 
@@ -1709,9 +1727,6 @@ ccd_units_sysctl(SYSCTLFN_ARGS)
 	if (nccd != 0) {
 		size = nccd * sizeof(*units);
 		units = kmem_zalloc(size, KM_SLEEP);
-		if (units == NULL)
-			return ENOMEM;
-
 		i = 0;
 		mutex_enter(&ccd_lock);
 		LIST_FOREACH(sc, &ccds, sc_link) {
@@ -1800,9 +1815,6 @@ ccd_components_sysctl(SYSCTLFN_ARGS)
 	if (size == 0)
 		return ENOENT;
 	names = kmem_zalloc(size, KM_SLEEP);
-	if (names == NULL)
-		return ENOMEM;
-
 	p = names;
 	ep = names + size;
 	mutex_enter(&ccd_lock);

@@ -1,17 +1,17 @@
-/*	$NetBSD: npf_perf_test.c,v 1.4 2014/06/25 00:21:42 rmind Exp $	*/
-
 /*
  * NPF benchmarking.
  *
  * Public Domain.
  */
 
+#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/param.h>
 
 #include <sys/kernel.h>
 #include <sys/kmem.h>
 #include <sys/kthread.h>
+#endif
 
 #include "npf_impl.h"
 #include "npf_test.h"
@@ -24,43 +24,30 @@ static volatile int	done;
 static uint64_t *	npackets;
 static bool		stateful;
 
-static struct mbuf *
-fill_packet(unsigned i)
-{
-	struct mbuf *m;
-	struct ip *ip;
-	struct udphdr *uh;
-	char buf[32];
-
-	m = mbuf_construct(IPPROTO_UDP);
-	uh = mbuf_return_hdrs(m, false, &ip);
-
-	snprintf(buf, sizeof(buf), "192.0.2.%u", i + i);
-	ip->ip_src.s_addr = inet_addr(PUB_IP1);
-	ip->ip_dst.s_addr = inet_addr(stateful ? LOCAL_IP2 : LOCAL_IP3);
-	uh->uh_sport = htons(80);
-	uh->uh_dport = htons(15000 + i);
-	return m;
-}
-
 __dead static void
 worker(void *arg)
 {
-	ifnet_t *ifp = ifunit(IFNAME_INT);
+	npf_t *npf = npf_getkernctx();
+	ifnet_t *ifp = npf_test_getif(IFNAME_INT);
 	unsigned int i = (uintptr_t)arg;
-	struct mbuf *m = fill_packet(i);
+	struct mbuf *m;
 	uint64_t n = 0;
+
+	m = mbuf_get_pkt(AF_INET, IPPROTO_UDP,
+	    PUB_IP1, stateful ? LOCAL_IP2 : LOCAL_IP3,
+	    80, 15000 + i);
 
 	while (!run)
 		/* spin-wait */;
 	while (!done) {
 		int error;
 
-		error = npf_packet_handler(NULL, &m, ifp, PFIL_OUT);
-		KASSERT(error == 0);
+		error = npfk_packet_handler(npf, &m, ifp, PFIL_OUT);
+		KASSERT(error == 0); (void)error;
 		n++;
 	}
 	npackets[i] = n;
+	m_freem(m);
 	kthread_exit(0);
 }
 
@@ -80,15 +67,15 @@ npf_test_conc(bool st, unsigned nthreads)
 	l = kmem_zalloc(sizeof(lwp_t *) * nthreads, KM_SLEEP);
 
 	for (unsigned i = 0; i < nthreads; i++) {
-		const int flags = KTHREAD_MUSTJOIN | KTHREAD_MPSAFE;
-		error = kthread_create(PRI_NONE, flags, NULL,
-		    worker, (void *)(uintptr_t)i, &l[i], "npfperf");
-		KASSERT(error == 0);
+		error = kthread_create(PRI_NONE, KTHREAD_MUSTJOIN |
+		    KTHREAD_MPSAFE, NULL, worker, (void *)(uintptr_t)i,
+		    &l[i], "npfperf");
+		KASSERT(error == 0); (void)error;
 	}
 
 	/* Let them spin! */
 	run = true;
-	kpause("perf", false, NSECS * hz, NULL);
+	kpause("perf", false, mstohz(NSECS * 1000), NULL);
 	done = true;
 
 	/* Wait until all threads exit and sum the counts. */

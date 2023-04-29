@@ -1,7 +1,7 @@
-#	$NetBSD: bsd.hostprog.mk,v 1.76 2016/01/01 17:06:21 christos Exp $
+#	$NetBSD: bsd.hostprog.mk,v 1.81.2.1 2019/11/10 12:58:30 martin Exp $
 #	@(#)bsd.prog.mk	8.2 (Berkeley) 4/2/94
 
-.include <bsd.init.mk>
+.include <bsd.hostinit.mk>
 .include <bsd.sys.mk>
 
 ##### Basic targets
@@ -39,6 +39,7 @@ LIBMAGIC?=	/usr/lib/libmagic.a
 LIBMENU?=	/usr/lib/libmenu.a
 LIBMP?=		/usr/lib/libmp.a
 LIBNTP?=	/usr/lib/libntp.a
+LIBNVMM?=	/usr/lib/libnvmm.a
 LIBOBJC?=	/usr/lib/libobjc.a
 LIBP2K?=	/usr/lib/libp2k.a
 LIBPANEL?=	/usr/lib/libpanel.a
@@ -48,14 +49,15 @@ LIBPCI?=	/usr/lib/libpci.a
 LIBPLOT?=	/usr/lib/libplot.a
 LIBPOSIX?=	/usr/lib/libposix.a
 LIBPTHREAD?=    /usr/lib/libpthread.a
-LIBPTHREAD_DBG?=/usr/lib/libpthread_dbg.a
 LIBPUFFS?=	/usr/lib/libpuffs.a
 LIBQUOTA?=	/usr/lib/libquota.a
+LIBREFUSE?=	/usr/lib/librefuse.a
 LIBRESOLV?=	/usr/lib/libresolv.a
 LIBRPCSVC?=	/usr/lib/librpcsvc.a
 LIBRUMP?=	/usr/lib/librump.a
 LIBRUMPCLIENT?=	/usr/lib/librumpclient.a
 LIBRUMPNET?=	/usr/lib/librumpnet.a
+LIBRUMPRES?=	/usr/lib/librumpres.a
 LIBRUMPUSER?=	/usr/lib/librumpuser.a
 LIBRUMPVFS?=	/usr/lib/librumpvfs.a
 LIBSKEY?=	/usr/lib/libskey.a
@@ -164,7 +166,7 @@ ${TARGETS}:	# ensure existence
 	echo '#include "nbtool_config.h"' >> ${.TARGET}.1
 	echo '#endif' >> ${.TARGET}.1
 	cat ${.TARGET} >> ${.TARGET}.1
-	mv ${.TARGET}.1 ${.TARGET}
+	${MV} ${.TARGET}.1 ${.TARGET}
 .y.c:
 	${_MKTARGET_YACC}
 	${YACC.y} -o ${.TARGET} ${.IMPSRC}
@@ -172,4 +174,4 @@ ${TARGETS}:	# ensure existence
 	echo '#include "nbtool_config.h"' >> ${.TARGET}.1
 	echo '#endif' >> ${.TARGET}.1
 	cat ${.TARGET} >> ${.TARGET}.1
-	mv ${.TARGET}.1 ${.TARGET}
+	${MV} ${.TARGET}.1 ${.TARGET}

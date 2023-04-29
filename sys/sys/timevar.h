@@ -1,4 +1,4 @@
-/*	$NetBSD: timevar.h,v 1.36 2016/03/08 05:02:55 christos Exp $	*/
+/*	$NetBSD: timevar.h,v 1.38.6.1 2019/09/10 16:16:46 martin Exp $	*/
 
 /*
  *  Copyright (c) 2005, 2008 The NetBSD Foundation.
@@ -84,6 +84,7 @@ struct 	ptimer {
 	int	pt_type;
 	int	pt_entry;
 	int	pt_queued;
+	bool	pt_dying;
 	struct proc *pt_proc;
 	TAILQ_ENTRY(ptimer) pt_chain;
 };
@@ -151,6 +152,7 @@ void	adjtime1(const struct timeval *, struct timeval *, struct proc *);
 int	clock_getres1(clockid_t, struct timespec *);
 int	clock_gettime1(clockid_t, struct timespec *);
 int	clock_settime1(struct proc *, clockid_t, const struct timespec *, bool);
+void	clock_timeleft(clockid_t, struct timespec *, struct timespec *);
 int	dogetitimer(struct proc *, int, struct itimerval *);
 int	dosetitimer(struct proc *, int, struct itimerval *);
 int	dotimer_gettime(int, struct proc *, struct itimerspec *);
@@ -173,7 +175,7 @@ int	settimeofday1(const struct timeval *, bool,
 int	timer_create1(timer_t *, clockid_t, struct sigevent *, copyin_t,
 	    struct lwp *);
 void	timer_gettime(struct ptimer *, struct itimerspec *);
-void	timer_settime(struct ptimer *);
+int	timer_settime(struct ptimer *);
 struct	ptimers *timers_alloc(struct proc *);
 void	timers_free(struct proc *, int);
 void	timer_tick(struct lwp *, bool);
@@ -189,13 +191,13 @@ bool	time_wraps(struct timespec *, struct timespec *);
 extern volatile time_t time_second;	/* current second in the epoch */
 extern volatile time_t time_uptime;	/* system uptime in seconds */
 
-static inline time_t time_mono_to_wall(time_t t)
+static __inline time_t time_mono_to_wall(time_t t)
 {
 
 	return t - time_uptime + time_second;
 }
 
-static inline time_t time_wall_to_mono(time_t t)
+static __inline time_t time_wall_to_mono(time_t t)
 {
 
 	return t - time_second + time_uptime;

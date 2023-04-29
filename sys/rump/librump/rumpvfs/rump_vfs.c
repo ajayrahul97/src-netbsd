@@ -1,4 +1,4 @@
-/*	$NetBSD: rump_vfs.c,v 1.84 2016/01/26 23:12:18 pooka Exp $	*/
+/*	$NetBSD: rump_vfs.c,v 1.88 2019/02/20 10:07:27 hannken Exp $	*/
 
 /*
  * Copyright (c) 2008 Antti Kantee.  All Rights Reserved.
@@ -29,7 +29,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: rump_vfs.c,v 1.84 2016/01/26 23:12:18 pooka Exp $");
+__KERNEL_RCSID(0, "$NetBSD: rump_vfs.c,v 1.88 2019/02/20 10:07:27 hannken Exp $");
 
 #include <sys/param.h>
 #include <sys/buf.h>
@@ -47,6 +47,7 @@ __KERNEL_RCSID(0, "$NetBSD: rump_vfs.c,v 1.84 2016/01/26 23:12:18 pooka Exp $");
 #include <sys/vfs_syscalls.h>
 #include <sys/vnode.h>
 #include <sys/wapbl.h>
+#include <sys/bufq.h>
 
 #include <miscfs/specfs/specdev.h>
 
@@ -120,12 +121,13 @@ RUMP_COMPONENT(RUMP__FACTION_VFS)
 		bufpages = rump_physmemlimit / (20 * PAGE_SIZE);
 	}
 
+	bufq_init();
+	fstrans_init();
 	vfsinit();
 	bufinit();
 	cwd_sys_init();
 	lf_init();
 	spec_init();
-	fstrans_init();
 
 	root_device = &rump_rootdev;
 
@@ -169,6 +171,7 @@ RUMP_COMPONENT(RUMP__FACTION_VFS)
 		}
 	}
 
+	module_init_class(MODULE_CLASS_BUFQ);
 	module_init_class(MODULE_CLASS_VFS);
 
 	/*
@@ -472,6 +475,8 @@ static bool
 rump_print_selector(void *cl, struct vnode *vp)
 {
 	int *full = cl;
+
+	KASSERT(mutex_owned(vp->v_interlock));
 
 	vfs_vnode_print(vp, *full, (void *)rumpuser_dprintf);
 	return false;

@@ -1,4 +1,4 @@
-#	$NetBSD: makesyscalls.sh,v 1.164 2016/01/26 23:46:37 pooka Exp $
+#	$NetBSD: makesyscalls.sh,v 1.173 2019/06/18 16:24:17 christos Exp $
 #
 # Copyright (c) 1994, 1996, 2000 Christopher G. Demetriou
 # All rights reserved.
@@ -78,7 +78,23 @@ case $1 in
 *)	. ./$1;;
 esac
 
+errmsg()
+{
+	fail=true;
+	printf '%s: %s\n' "$0" "$*" >&2
+}
+
+fail=false
+case "${nsysent:-0}" in
+*[!0-9]*)	errmsg "Non numeric value for nsysent:" "${nsysent}";;
+esac
+case "${maxsysargs:-0}" in
+*[!0-9]*)	errmsg "Non numeric value for maxsysargs:" "${maxsysargs}";;
+esac
+$fail && exit 1
+
 # tmp files:
+sysautoloadbottom="$sysautoload.bottom"
 sysdcl="sysent.dcl"
 sysprotos="sys.protos"
 syscompat_pref="sysent."
@@ -91,7 +107,7 @@ systracetmp="systrace.$$"
 systraceret="systraceret.$$"
 
 cleanup() {
-    rm $sysdcl $sysprotos $sysent $sysnamesbottom $sysnamesfriendly $rumpsysent $rumptypes $rumpprotos $systracetmp $systraceret
+    rm $sysdcl $sysprotos $sysent $sysnamesbottom $sysnamesfriendly $rumpsysent $rumptypes $rumpprotos $systracetmp $systraceret $sysautoloadbottom
 }
 trap "cleanup" 0
 
@@ -147,7 +163,6 @@ BEGIN {
 
 	# to allow nested #if/#else/#endif sets
 	savedepth = 0
-	auto_skip = 0
 	# to track already processed syscalls
 
 	sysnames = \"$sysnames\"
@@ -159,6 +174,7 @@ BEGIN {
 	systracetmp = \"$systracetmp\"
 	systraceret = \"$systraceret\"
 	sysautoload = \"$sysautoload\"
+	sysautoloadbottom = \"${sysautoload}.bottom\"
 	rumpcalls = \"$rumpcalls\"
 	rumpcallshdr = \"$rumpcallshdr\"
 	rumpsysent = \"$rumpsysent\"
@@ -172,7 +188,7 @@ BEGIN {
 	if (!registertype) {
 	    registertype = \"register_t\"
 	}
-	nsysent = \"$nsysent\"
+	nsysent = ${nsysent:-0}
 
 	sysdcl = \"$sysdcl\"
 	syscompat_pref = \"$syscompat_pref\"
@@ -182,7 +198,7 @@ BEGIN {
 	rumpprotos = \"$rumpprotos\"
 	rumptypes = \"$rumptypes\"
 	sys_nosys = \"$sys_nosys\"
-	maxsysargs = \"$maxsysargs\"
+	maxsysargs = ${maxsysargs:-8}
 	rumpnoflags=\"$rumpnoflags\"
 	rumpnosys=\"$rumpnosys\"
 	rumpnomodule=\"$rumpnomodule\"
@@ -257,9 +273,8 @@ NR == 1 {
 
 	printf " * created from%s\n */\n\n", $0 > sysautoload
 	printf "#include <sys/cdefs.h>\n__KERNEL_RCSID(0, \"%s\");\n\n", tag > sysautoload
-	printf("#include <sys/proc.h>\n")		> sysautoload
 	printf("static struct sc_autoload " emulname \
-		"_syscalls_autoload[] = {\n")		> sysautoload
+		"_syscalls_autoload[] = {\n")		> sysautoloadbottom
 
 	printf " * created from%s\n */\n\n", $0 > rumpcalls
 	printf "#ifdef RUMP_CLIENT\n" > rumpcalls
@@ -341,6 +356,10 @@ NR == 1 {
 	printf "#include <rump/rump_syscalls_compat.h>\n\n" > rumpcallshdr
 
 	printf "%s", sysarghdrextra > sysarghdr
+	printf "/* Forward declaration */\n" > sysarghdr
+	printf "struct lwp;\n" > sysarghdr
+	printf "\n" > sysarghdr
+
 	# Write max number of system call arguments to both headers
 	printf("#define\t%sMAXSYSARGS\t%d\n\n", constprefix, maxsysargs) \
 		> sysnumhdr
@@ -399,39 +418,25 @@ $0 ~ /^%%$/ {
 $1 ~ /^#[ 	]*include/ {
 	print > sysdcl
 	print > sysnames
+	print > sysautoload
 	next
 }
 $1 ~ /^#/ && !intable {
 	print > sysdcl
 	print > sysnames
+	print > sysautoload
 	next
 }
 $1 ~ /^#/ && intable {
 	if ($1 ~ /^#[ 	]*if/) {
 		savedepth++
 		savesyscall[savedepth] = syscall
-		skip_auto[savedepth] = auto_skip
-		auto_skip = 0
-
-		# Special handling for sysautoload conditionals
-		#
-		# We ignore all conditions other than those for
-		# !defined(_LP64) which are used for SYSV* syscalls
-		# only
-
-		if ($0 ~ /!defined\(_LP64\)/) {
-			printf("#if !defined(_LP64)\n") > sysautoload
-			auto_skip = savedepth
-		}
 	}
 	if ($1 ~ /^#[ 	]*else/) {
 		if (savedepth <= 0) {
 			printf("%s: line %d: unbalanced #else\n", \
 			    infile, NR)
 			exit 1
-		}
-		if (auto_skip == savedepth) {
-			print > sysautoload
 		}
 		syscall = savesyscall[savedepth]
 	}
@@ -441,16 +446,13 @@ $1 ~ /^#/ && intable {
 			    infile, NR)
 			exit 1
 		}
-		if (auto_skip == savedepth) {
-			print > sysautoload
-		}
-		auto_skip = skip_auto[savedepth];
 		savedepth--
 	}
 	print > sysent
 	print > sysarghdr
 	print > sysnumhdr
 	print > sysprotos
+	print > sysautoloadbottom
 	print > sysnamesbottom
 	print > sysnamesfriendly
 	print > systrace
@@ -469,6 +471,11 @@ syscall != $1 {
 	printf "line is:\n"
 	print
 	exit 1
+}
+function isarg64(type) {
+	gsub("netbsd32_", "", type);
+	return type == "quad_t" || type == "off_t" \
+	    || type == "dev_t" ||  type == "time_t";
 }
 function parserr(was, wanted) {
 	printf "%s: line %d: unexpected %s (expected <%s>)\n", \
@@ -573,7 +580,7 @@ function parseline() {
 	} else {
 		funcname=fprefix "_" fbase
 	}
-	if (returntype == "quad_t" || returntype == "off_t") {
+	if (isarg64(returntype)) {
 		if (sycall_flags == "0")
 			sycall_flags = "SYCALL_RET_64";
 		else
@@ -646,8 +653,7 @@ function parseline() {
 		} else {
 			argalign++;
 		}
-		if (argtype[argc] == "quad_t" || argtype[argc] == "off_t" \
-		  || argtype[argc] == "dev_t" || argtype[argc] == "time_t") {
+		if (isarg64(argtype[argc])) {
 			if (sycall_flags == "0")
 				sycall_flags = "SYCALL_ARG"argc-1"_64";
 			else
@@ -686,9 +692,9 @@ function printproto(wrap) {
 	    syscall) > sysnumhdr
 
 	# output entry for syscall autoload table, if modular
-	if (modular ) {
+	if (modular) {
 		printf("\t    { %s%s%s, \"%s\" },\n", constprefix, wrap,
-		    funcalias, modname) > sysautoload
+		   funcalias, modname) > sysautoloadbottom
 	}
 
 
@@ -789,7 +795,7 @@ function putsystrace(type, compatwrap_) {
 	printf("\t/* %s */\n\tcase %d:\n", funcname, syscall) > systraceret
 	if (argc > 0) {
 		printf("\t\tswitch(ndx) {\n") > systracetmp
-		printf("\t\tstruct %s%s_args *p = params;\n", compatwrap_, funcname) > systrace
+		printf("\t\tconst struct %s%s_args *p = params;\n", compatwrap_, funcname) > systrace
 		for (i = 1; i <= argc; i++) {
 			arg = argtype[i]
 			sub("__restrict$", "", arg)
@@ -799,7 +805,8 @@ function putsystrace(type, compatwrap_) {
 				printf("\t\tuarg[%d] = (intptr_t) SCARG(p, %s).i32; /* %s */\n", \
 				     i - 1, \
 				     argname[i], arg) > systrace
-			else if (index(arg, "*") > 0 || arg == "caddr_t")
+			else if (index(arg, "*") > 0 || arg == "caddr_t" ||
+			    arg ~ /.*_handler_t$/)
 				printf("\t\tuarg[%d] = (intptr_t) SCARG(p, %s); /* %s */\n", \
 				     i - 1, \
 				     argname[i], arg) > systrace
@@ -846,9 +853,12 @@ function putent(type, compatwrap) {
 	if (argc != 0) {
 		printf("\n\t\tns(struct %s%s_args),", compatwrap_, funcname) > sysent
 	}
-	if (modular) 
+	if (modular) {
 		wfn = "sys_nomodule";
-	else if (compatwrap == "")
+		idx = int(syscall / 32);
+		bit = 2 ^ (syscall % 32);
+		nomodbits[ idx ] += bit;
+	} else if (compatwrap == "")
 		wfn = funcname;
 	else
 		wfn = compatwrap "(" funcname ")";
@@ -1117,6 +1127,7 @@ END {
 	}
 
 	maxsyscall = syscall
+
 	if (nsysent) {
 		if (syscall > nsysent) {
 			printf("%s: line %d: too many syscalls [%d > %d]\n", infile, NR, syscall, nsysent)
@@ -1131,6 +1142,16 @@ END {
 			    > sysnamesfriendly
 			syscall++
 		}
+	}
+	printf("};\n") > sysent
+	printf("\nconst uint32_t %s_nomodbits[] = {\n", switchname) > sysent
+	printf("};\n") > rumpsysent
+	printf("\nconst uint32_t rump_sysent_nomodbits[] = {\n") > rumpsysent
+	for (i = 0; i < syscall / 32; i++) {
+		printf("\t0x%08x,\t/* syscalls %3d-%3d */\n",
+			nomodbits[i], i * 32, i * 32 + 31) > sysent
+		printf("\t0x%08x,\t/* syscalls %3d-%3d */\n",
+			nomodbits[i], i * 32, i * 32 + 31) > rumpsysent
 	}
 	printf("};\n") > sysent
 	printf("};\n") > rumpsysent
@@ -1152,13 +1173,14 @@ END {
 cat $sysprotos >> $sysarghdr
 echo "#endif /* _${constprefix}SYSCALL_H_ */" >> $sysnumhdr
 echo "#endif /* _${constprefix}SYSCALLARGS_H_ */" >> $sysarghdr
-printf "\t    { 0, NULL }\n" >> $sysautoload
-echo "};" >> $sysautoload
+printf "\t    { 0, NULL }\n" >> $sysautoloadbottom
+echo "};" >> $sysautoloadbottom
 printf "\n#endif /* _RUMP_RUMP_SYSCALLS_H_ */\n" >> $rumpprotos
 cat $sysdcl $sysent > $syssw
 cat $sysnamesbottom >> $sysnames
 cat $sysnamesfriendly >> $sysnames
 cat $rumpsysent >> $rumpcalls
+cat $sysautoloadbottom >> $sysautoload
 
 touch $rumptypes
 cat $rumptypes >> $rumpcallshdr

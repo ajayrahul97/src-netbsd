@@ -1,4 +1,4 @@
-/*	$NetBSD: cpuvar.h,v 1.18 2015/06/16 06:51:16 matt Exp $	*/
+/*	$NetBSD: cpuvar.h,v 1.20 2019/04/07 05:25:55 thorpej Exp $	*/
 /*-
  * Copyright (c) 2010, 2011 The NetBSD Foundation, Inc.
  * All rights reserved.
@@ -140,7 +140,7 @@ struct cpu_md_ops {
 
 #ifdef _KERNEL
 
-static inline register_t
+static __inline register_t
 wrtee(register_t msr)
 {
 	register_t old_msr;
@@ -153,8 +153,6 @@ wrtee(register_t msr)
 	}
 	return old_msr;
 }
-
-uint32_t ufetch_32(const void *);
 
 struct trapframe;
 void	booke_sstep(struct trapframe *);

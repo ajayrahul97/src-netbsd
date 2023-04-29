@@ -1,4 +1,4 @@
-/*      $NetBSD: sdtemp.c,v 1.31 2016/07/28 09:11:13 msaitoh Exp $        */
+/*      $NetBSD: sdtemp.c,v 1.35 2019/02/28 16:56:35 khorben Exp $        */
 
 /*
  * Copyright (c) 2009 The NetBSD Foundation, Inc.
@@ -30,7 +30,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: sdtemp.c,v 1.31 2016/07/28 09:11:13 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: sdtemp.c,v 1.35 2019/02/28 16:56:35 khorben Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -115,6 +115,8 @@ sdtemp_dev_table[] = {
 	"Giantec GT34TS02" },
     { MAXIM_MANUFACTURER_ID, MAX_6604_DEVICE_ID,     MAX_6604_MASK,	  NULL,
 	"Maxim MAX6604" },
+    { MAXIM_MANUFACTURER_ID, MAX_6604_2_DEVICE_ID,   MAX_6604_MASK,	  NULL,
+	"Maxim MAX6604" },
     { MCP_MANUFACTURER_ID,  MCP_9804_DEVICE_ID,	     MCP_9804_MASK,	  CMCP,
 	"Microchip Tech MCP9804" },
     { MCP_MANUFACTURER_ID,  MCP_9805_DEVICE_ID,	     MCP_9805_MASK,	  NULL,
@@ -125,6 +127,8 @@ sdtemp_dev_table[] = {
 	"Microchip Tech MCP98243" },
     { MCP_MANUFACTURER_ID,  MCP_98244_DEVICE_ID,     MCP_98244_MASK,	  CMCP,
 	"Microchip Tech MCP98244" },
+    { MCP2_MANUFACTURER_ID, MCP2_EMC1501_DEVICE_ID,  MCP2_EMC1501_MASK,	  NULL,
+	"Microchip Tech EMC1501" },
     { ADT_MANUFACTURER_ID,  ADT_7408_DEVICE_ID,	     ADT_7408_MASK,	  NULL,
 	"Analog Devices ADT7408" },
     { NXP_MANUFACTURER_ID,  NXP_SE98_DEVICE_ID,	     NXP_SE98_MASK,	  NULL,
@@ -147,8 +151,6 @@ sdtemp_dev_table[] = {
 	"Catalyst CAT34TS02C" },
     { CAT_MANUFACTURER_ID,  CAT_34TS04_DEVICE_ID,    CAT_34TS04_MASK,	  NULL,
 	"Catalyst CAT34TS04" },
-    { IDT_MANUFACTURER_ID,  IDT_TSE2002GB2_DEVICE_ID,IDT_TSE2002GB2_MASK, CIDT,
-	"Integrated Device Technology TSE2002GB2" },
     { IDT_MANUFACTURER_ID,  IDT_TSE2004GB2_DEVICE_ID,IDT_TSE2004GB2_MASK, NULL,
 	"Integrated Device Technology TSE2004GB2" },
     { IDT_MANUFACTURER_ID,  IDT_TS3000B3_DEVICE_ID,  IDT_TS3000B3_MASK,	  CIDT,
@@ -238,7 +240,7 @@ sdtemp_match(device_t parent, cfdata_t cf, void *aux)
 	if ((cap & SDTEMP_CAP_HAS_ALARM) == 0)
 		return 0;
 
-	return 1;
+	return I2C_MATCH_ADDRESS_AND_PROBE;
 }
 
 static void
@@ -295,7 +297,7 @@ sdtemp_attach(device_t parent, device_t self, void *aux)
 	 * IDT's devices and some Microchip's devices have the resolution
 	 * register in the vendor specific registers area. The devices'
 	 * resolution bits in the capability register are not the maximum
-	 * resolution but the current vaule of the setting.
+	 * resolution but the current value of the setting.
 	 */
 	if (sdtemp_dev_table[i].sdtemp_config != NULL)
 		sdtemp_dev_table[i].sdtemp_config(sc);

@@ -1,4 +1,4 @@
-/*	$NetBSD: if_stge.c,v 1.60 2016/07/07 06:55:41 msaitoh Exp $	*/
+/*	$NetBSD: if_stge.c,v 1.70.2.3 2019/11/25 16:44:31 martin Exp $	*/
 
 /*-
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
@@ -35,7 +35,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_stge.c,v 1.60 2016/07/07 06:55:41 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_stge.c,v 1.70.2.3 2019/11/25 16:44:31 martin Exp $");
 
 
 #include <sys/param.h>
@@ -76,134 +76,9 @@ __KERNEL_RCSID(0, "$NetBSD: if_stge.c,v 1.60 2016/07/07 06:55:41 msaitoh Exp $")
 #define	STGE_VLAN_UNTAG			1
 /* #define	STGE_VLAN_CFI		1 */
 
-/*
- * Transmit descriptor list size.
- */
-#define	STGE_NTXDESC		256
-#define	STGE_NTXDESC_MASK	(STGE_NTXDESC - 1)
-#define	STGE_NEXTTX(x)		(((x) + 1) & STGE_NTXDESC_MASK)
-
-/*
- * Receive descriptor list size.
- */
-#define	STGE_NRXDESC		256
-#define	STGE_NRXDESC_MASK	(STGE_NRXDESC - 1)
-#define	STGE_NEXTRX(x)		(((x) + 1) & STGE_NRXDESC_MASK)
-
-/*
- * Only interrupt every N frames.  Must be a power-of-two.
- */
-#define	STGE_TXINTR_SPACING	16
-#define	STGE_TXINTR_SPACING_MASK (STGE_TXINTR_SPACING - 1)
-
-/*
- * Control structures are DMA'd to the TC9021 chip.  We allocate them in
- * a single clump that maps to a single DMA segment to make several things
- * easier.
- */
-struct stge_control_data {
-	/*
-	 * The transmit descriptors.
-	 */
-	struct stge_tfd scd_txdescs[STGE_NTXDESC];
-
-	/*
-	 * The receive descriptors.
-	 */
-	struct stge_rfd scd_rxdescs[STGE_NRXDESC];
-};
-
 #define	STGE_CDOFF(x)	offsetof(struct stge_control_data, x)
 #define	STGE_CDTXOFF(x)	STGE_CDOFF(scd_txdescs[(x)])
 #define	STGE_CDRXOFF(x)	STGE_CDOFF(scd_rxdescs[(x)])
-
-/*
- * Software state for transmit and receive jobs.
- */
-struct stge_descsoft {
-	struct mbuf *ds_mbuf;		/* head of our mbuf chain */
-	bus_dmamap_t ds_dmamap;		/* our DMA map */
-};
-
-/*
- * Software state per device.
- */
-struct stge_softc {
-	device_t sc_dev;		/* generic device information */
-	bus_space_tag_t sc_st;		/* bus space tag */
-	bus_space_handle_t sc_sh;	/* bus space handle */
-	bus_dma_tag_t sc_dmat;		/* bus DMA tag */
-	struct ethercom sc_ethercom;	/* ethernet common data */
-	int sc_rev;			/* silicon revision */
-
-	void *sc_ih;			/* interrupt cookie */
-
-	struct mii_data sc_mii;		/* MII/media information */
-
-	callout_t sc_tick_ch;		/* tick callout */
-
-	bus_dmamap_t sc_cddmamap;	/* control data DMA map */
-#define	sc_cddma	sc_cddmamap->dm_segs[0].ds_addr
-
-	/*
-	 * Software state for transmit and receive descriptors.
-	 */
-	struct stge_descsoft sc_txsoft[STGE_NTXDESC];
-	struct stge_descsoft sc_rxsoft[STGE_NRXDESC];
-
-	/*
-	 * Control data structures.
-	 */
-	struct stge_control_data *sc_control_data;
-#define	sc_txdescs	sc_control_data->scd_txdescs
-#define	sc_rxdescs	sc_control_data->scd_rxdescs
-
-#ifdef STGE_EVENT_COUNTERS
-	/*
-	 * Event counters.
-	 */
-	struct evcnt sc_ev_txstall;	/* Tx stalled */
-	struct evcnt sc_ev_txdmaintr;	/* Tx DMA interrupts */
-	struct evcnt sc_ev_txindintr;	/* Tx Indicate interrupts */
-	struct evcnt sc_ev_rxintr;	/* Rx interrupts */
-
-	struct evcnt sc_ev_txseg1;	/* Tx packets w/ 1 segment */
-	struct evcnt sc_ev_txseg2;	/* Tx packets w/ 2 segments */
-	struct evcnt sc_ev_txseg3;	/* Tx packets w/ 3 segments */
-	struct evcnt sc_ev_txseg4;	/* Tx packets w/ 4 segments */
-	struct evcnt sc_ev_txseg5;	/* Tx packets w/ 5 segments */
-	struct evcnt sc_ev_txsegmore;	/* Tx packets w/ more than 5 segments */
-	struct evcnt sc_ev_txcopy;	/* Tx packets that we had to copy */
-
-	struct evcnt sc_ev_rxipsum;	/* IP checksums checked in-bound */
-	struct evcnt sc_ev_rxtcpsum;	/* TCP checksums checked in-bound */
-	struct evcnt sc_ev_rxudpsum;	/* UDP checksums checked in-bound */
-
-	struct evcnt sc_ev_txipsum;	/* IP checksums comp. out-bound */
-	struct evcnt sc_ev_txtcpsum;	/* TCP checksums comp. out-bound */
-	struct evcnt sc_ev_txudpsum;	/* UDP checksums comp. out-bound */
-#endif /* STGE_EVENT_COUNTERS */
-
-	int	sc_txpending;		/* number of Tx requests pending */
-	int	sc_txdirty;		/* first dirty Tx descriptor */
-	int	sc_txlast;		/* last used Tx descriptor */
-
-	int	sc_rxptr;		/* next ready Rx descriptor/descsoft */
-	int	sc_rxdiscard;
-	int	sc_rxlen;
-	struct mbuf *sc_rxhead;
-	struct mbuf *sc_rxtail;
-	struct mbuf **sc_rxtailp;
-
-	int	sc_txthresh;		/* Tx threshold */
-	uint32_t sc_usefiber:1;		/* if we're fiber */
-	uint32_t sc_stge1023:1;		/* are we a 1023 */
-	uint32_t sc_DMACtrl;		/* prototype DMACtrl register */
-	uint32_t sc_MACCtrl;		/* prototype MacCtrl register */
-	uint16_t sc_IntEnable;		/* prototype IntEnable register */
-	uint16_t sc_ReceiveMode;	/* prototype ReceiveMode register */
-	uint8_t sc_PhyCtrl;		/* prototype PhyCtrl register */
-};
 
 #define	STGE_RXCHAIN_RESET(sc)						\
 do {									\
@@ -251,7 +126,7 @@ do {									\
 	__rfd->rfd_next =						\
 	    htole64((uint64_t)STGE_CDRXADDR((sc), STGE_NEXTRX((x))));	\
 	__rfd->rfd_status = 0;						\
-	STGE_CDRXSYNC((sc), (x), BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE); \
+	STGE_CDRXSYNC((sc), (x), BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE); \
 } while (/*CONSTCOND*/0)
 
 #define STGE_TIMEOUT 1000
@@ -278,8 +153,8 @@ static int	stge_intr(void *);
 static void	stge_txintr(struct stge_softc *);
 static void	stge_rxintr(struct stge_softc *);
 
-static int	stge_mii_readreg(device_t, int, int);
-static void	stge_mii_writereg(device_t, int, int, int);
+static int	stge_mii_readreg(device_t, int, int, uint16_t *);
+static int	stge_mii_writereg(device_t, int, int, uint16_t);
 static void	stge_mii_statchg(struct ifnet *);
 
 static int	stge_match(device_t, cfdata_t, void *);
@@ -375,6 +250,7 @@ stge_attach(device_t parent, device_t self, void *aux)
 	struct stge_softc *sc = device_private(self);
 	struct pci_attach_args *pa = aux;
 	struct ifnet *ifp = &sc->sc_ethercom.ec_if;
+	struct mii_data * const mii = &sc->sc_mii;
 	pci_chipset_tag_t pc = pa->pa_pc;
 	pci_intr_handle_t ih;
 	const char *intrstr = NULL;
@@ -388,6 +264,7 @@ stge_attach(device_t parent, device_t self, void *aux)
 	uint8_t enaddr[ETHER_ADDR_LEN];
 	char intrbuf[PCI_INTRSTR_LEN];
 
+	sc->sc_dev = self;
 	callout_init(&sc->sc_tick_ch, 0);
 
 	sp = stge_lookup(pa);
@@ -407,7 +284,7 @@ stge_attach(device_t parent, device_t self, void *aux)
 	    PCI_MAPREG_TYPE_IO, 0,
 	    &iot, &ioh, NULL, NULL) == 0);
 	memh_valid = (pci_mapreg_map(pa, STGE_PCI_MMBA,
-	    PCI_MAPREG_TYPE_MEM|PCI_MAPREG_MEM_TYPE_32BIT, 0,
+	    PCI_MAPREG_TYPE_MEM | PCI_MAPREG_MEM_TYPE_32BIT, 0,
 	    &memt, &memh, NULL, NULL) == 0);
 
 	if (memh_valid) {
@@ -442,7 +319,8 @@ stge_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 	intrstr = pci_intr_string(pc, ih, intrbuf, sizeof(intrbuf));
-	sc->sc_ih = pci_intr_establish(pc, ih, IPL_NET, stge_intr, sc);
+	sc->sc_ih = pci_intr_establish_xname(pc, ih, IPL_NET, stge_intr, sc,
+	    device_xname(self));
 	if (sc->sc_ih == NULL) {
 		aprint_error_dev(self, "unable to establish interrupt");
 		if (intrstr != NULL)
@@ -594,20 +472,20 @@ stge_attach(device_t parent, device_t self, void *aux)
 	/*
 	 * Initialize our media structures and probe the MII.
 	 */
-	sc->sc_mii.mii_ifp = ifp;
-	sc->sc_mii.mii_readreg = stge_mii_readreg;
-	sc->sc_mii.mii_writereg = stge_mii_writereg;
-	sc->sc_mii.mii_statchg = stge_mii_statchg;
-	sc->sc_ethercom.ec_mii = &sc->sc_mii;
-	ifmedia_init(&sc->sc_mii.mii_media, IFM_IMASK, ether_mediachange,
+	mii->mii_ifp = ifp;
+	mii->mii_readreg = stge_mii_readreg;
+	mii->mii_writereg = stge_mii_writereg;
+	mii->mii_statchg = stge_mii_statchg;
+	sc->sc_ethercom.ec_mii = mii;
+	ifmedia_init(&mii->mii_media, IFM_IMASK, ether_mediachange,
 	    ether_mediastatus);
-	mii_attach(self, &sc->sc_mii, 0xffffffff, MII_PHY_ANY,
+	mii_attach(self, mii, 0xffffffff, MII_PHY_ANY,
 	    MII_OFFSET_ANY, MIIF_DOPAUSE);
-	if (LIST_FIRST(&sc->sc_mii.mii_phys) == NULL) {
-		ifmedia_add(&sc->sc_mii.mii_media, IFM_ETHER|IFM_NONE, 0, NULL);
-		ifmedia_set(&sc->sc_mii.mii_media, IFM_ETHER|IFM_NONE);
+	if (LIST_FIRST(&mii->mii_phys) == NULL) {
+		ifmedia_add(&mii->mii_media, IFM_ETHER | IFM_NONE, 0, NULL);
+		ifmedia_set(&mii->mii_media, IFM_ETHER | IFM_NONE);
 	} else
-		ifmedia_set(&sc->sc_mii.mii_media, IFM_ETHER|IFM_AUTO);
+		ifmedia_set(&mii->mii_media, IFM_ETHER | IFM_AUTO);
 
 	ifp = &sc->sc_ethercom.ec_if;
 	strlcpy(ifp->if_xname, device_xname(self), IFNAMSIZ);
@@ -645,6 +523,7 @@ stge_attach(device_t parent, device_t self, void *aux)
 	sc->sc_ethercom.ec_capabilities |=
 	    ETHERCAP_VLAN_MTU | /* XXX ETHERCAP_JUMBO_MTU | */
 	    ETHERCAP_VLAN_HWTAGGING;
+	sc->sc_ethercom.ec_capenable |= ETHERCAP_VLAN_HWTAGGING;
 
 	/*
 	 * We can do IPv4/TCPv4/UDPv4 checksums in hardware.
@@ -658,6 +537,7 @@ stge_attach(device_t parent, device_t self, void *aux)
 	 * Attach the interface.
 	 */
 	if_attach(ifp);
+	if_deferred_start_init(ifp, NULL);
 	ether_ifattach(ifp, enaddr);
 
 #ifdef STGE_EVENT_COUNTERS
@@ -788,7 +668,7 @@ stge_start(struct ifnet *ifp)
 	int error, firsttx, nexttx, opending, seg, totlen;
 	uint64_t csum_flags;
 
-	if ((ifp->if_flags & (IFF_RUNNING|IFF_OACTIVE)) != IFF_RUNNING)
+	if ((ifp->if_flags & (IFF_RUNNING | IFF_OACTIVE)) != IFF_RUNNING)
 		return;
 
 	/*
@@ -804,8 +684,9 @@ stge_start(struct ifnet *ifp)
 	 * descriptors.
 	 */
 	for (;;) {
-		struct m_tag *mtag;
 		uint64_t tfc;
+		bool have_vtag;
+		uint16_t vtag;
 
 		/*
 		 * Grab a packet off the queue.
@@ -826,7 +707,9 @@ stge_start(struct ifnet *ifp)
 		/*
 		 * See if we have any VLAN stuff.
 		 */
-		mtag = VLAN_OUTPUT_TAG(&sc->sc_ethercom, m0);
+		have_vtag = vlan_has_tag(m0);
+		if (have_vtag)
+			vtag = vlan_get_tag(m0);
 
 		/*
 		 * Get the last and next available transmit descriptor.
@@ -930,11 +813,11 @@ stge_start(struct ifnet *ifp)
 		    TFD_FragCount(seg) | csum_flags |
 		    (((nexttx & STGE_TXINTR_SPACING_MASK) == 0) ?
 			TFD_TxDMAIndicate : 0);
-		if (mtag) {
+		if (have_vtag) {
 #if	0
 			struct ether_header *eh =
 			    mtod(m0, struct ether_header *);
-			u_int16_t etype = ntohs(eh->ether_type);
+			uint16_t etype = ntohs(eh->ether_type);
 			printf("%s: xmit (tag %d) etype %x\n",
 			   ifp->if_xname, *mtod(n, int *), etype);
 #endif
@@ -942,13 +825,13 @@ stge_start(struct ifnet *ifp)
 #ifdef	STGE_VLAN_CFI
 			    TFD_CFI |
 #endif
-			    TFD_VID(VLAN_TAG_VALUE(mtag));
+			    TFD_VID(vtag);
 		}
 		tfd->tfd_control = htole64(tfc);
 
 		/* Sync the descriptor. */
 		STGE_CDTXSYNC(sc, nexttx,
-		    BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE);
+		    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 
 		/*
 		 * Kick the transmit DMA logic.
@@ -968,7 +851,7 @@ stge_start(struct ifnet *ifp)
 		/*
 		 * Pass the packet to any BPF listeners.
 		 */
-		bpf_mtap(ifp, m0);
+		bpf_mtap(ifp, m0, BPF_D_OUT);
 	}
 
 	if (sc->sc_txpending == (STGE_NTXDESC - 1)) {
@@ -1081,7 +964,7 @@ stge_intr(void *arg)
 		}
 
 		/* Receive interrupts. */
-		if (isr & (IS_RxDMAComplete|IS_RFDListEnd)) {
+		if (isr & (IS_RxDMAComplete | IS_RFDListEnd)) {
 			STGE_EVCNT_INCR(&sc->sc_ev_rxintr);
 			stge_rxintr(sc);
 			if (isr & IS_RFDListEnd) {
@@ -1096,7 +979,7 @@ stge_intr(void *arg)
 		}
 
 		/* Transmit interrupts. */
-		if (isr & (IS_TxDMAComplete|IS_TxComplete)) {
+		if (isr & (IS_TxDMAComplete | IS_TxComplete)) {
 #ifdef STGE_EVENT_COUNTERS
 			if (isr & IS_TxDMAComplete)
 				STGE_EVCNT_INCR(&sc->sc_ev_txdmaintr);
@@ -1141,7 +1024,7 @@ stge_intr(void *arg)
 	    sc->sc_IntEnable);
 
 	/* Try to get more packets going. */
-	stge_start(ifp);
+	if_schedule_deferred_start(ifp);
 
 	return (1);
 }
@@ -1170,7 +1053,7 @@ stge_txintr(struct stge_softc *sc)
 		ds = &sc->sc_txsoft[i];
 
 		STGE_CDTXSYNC(sc, i,
-		    BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
+		    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 
 		control = le64toh(sc->sc_txdescs[i].tfd_control);
 		if ((control & TFD_TFDDone) == 0)
@@ -1212,7 +1095,7 @@ stge_rxintr(struct stge_softc *sc)
 		ds = &sc->sc_rxsoft[i];
 
 		STGE_CDRXSYNC(sc, i,
-		    BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
+		    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 
 		status = le64toh(sc->sc_rxdescs[i].rfd_status);
 
@@ -1352,24 +1235,23 @@ stge_rxintr(struct stge_softc *sc)
 		 * Pass this up to any BPF listeners, but only
 		 * pass if up the stack if it's for us.
 		 */
-		bpf_mtap(ifp, m);
 #ifdef	STGE_VLAN_UNTAG
 		/*
 		 * Check for VLAN tagged packets
 		 */
 		if (status & RFD_VLANDetected)
-			VLAN_INPUT_TAG(ifp, m, RFD_TCI(status), continue);
+			vlan_set_tag(m, RFD_TCI(status));
 
 #endif
 #if	0
 		if (status & RFD_VLANDetected) {
 			struct ether_header *eh;
-			u_int16_t etype;
+			uint16_t etype;
 
 			eh = mtod(m, struct ether_header *);
 			etype = ntohs(eh->ether_type);
 			printf("%s: VLANtag detected (TCI %d) etype %x\n",
-			    ifp->if_xname, (u_int16_t) RFD_TCI(status),
+			    ifp->if_xname, (uint16_t) RFD_TCI(status),
 			    etype);
 		}
 #endif
@@ -1414,8 +1296,7 @@ stge_stats_update(struct stge_softc *sc)
 
 	(void) bus_space_read_4(st, sh, STGE_OctetRcvOk);
 
-	ifp->if_ipackets +=
-	    bus_space_read_4(st, sh, STGE_FramesRcvdOk);
+	(void) bus_space_read_4(st, sh, STGE_FramesRcvdOk);
 
 	ifp->if_ierrors +=
 	    (u_int) bus_space_read_2(st, sh, STGE_FramesLostRxErrors);
@@ -1877,9 +1758,12 @@ stge_set_filter(struct stge_softc *sc)
 
 	memset(mchash, 0, sizeof(mchash));
 
+	ETHER_LOCK(ec);
 	ETHER_FIRST_MULTI(step, ec, enm);
-	if (enm == NULL)
+	if (enm == NULL) {
+		ETHER_UNLOCK(ec);
 		goto done;
+	}
 
 	while (enm != NULL) {
 		if (memcmp(enm->enm_addrlo, enm->enm_addrhi, ETHER_ADDR_LEN)) {
@@ -1891,6 +1775,7 @@ stge_set_filter(struct stge_softc *sc)
 			 * ranges is for IP multicast routing, for which the
 			 * range is big enough to require all bits set.)
 			 */
+			ETHER_UNLOCK(ec);
 			goto allmulti;
 		}
 
@@ -1904,6 +1789,7 @@ stge_set_filter(struct stge_softc *sc)
 
 		ETHER_NEXT_MULTI(step, enm);
 	}
+	ETHER_UNLOCK(ec);
 
 	sc->sc_ReceiveMode |= RM_ReceiveMulticastHash;
 
@@ -1935,10 +1821,10 @@ stge_set_filter(struct stge_softc *sc)
  *	Read a PHY register on the MII of the TC9021.
  */
 static int
-stge_mii_readreg(device_t self, int phy, int reg)
+stge_mii_readreg(device_t self, int phy, int reg, uint16_t *val)
 {
 
-	return (mii_bitbang_readreg(self, &stge_mii_bitbang_ops, phy, reg));
+	return mii_bitbang_readreg(self, &stge_mii_bitbang_ops, phy, reg, val);
 }
 
 /*
@@ -1946,11 +1832,12 @@ stge_mii_readreg(device_t self, int phy, int reg)
  *
  *	Write a PHY register on the MII of the TC9021.
  */
-static void
-stge_mii_writereg(device_t self, int phy, int reg, int val)
+static int
+stge_mii_writereg(device_t self, int phy, int reg, uint16_t val)
 {
 
-	mii_bitbang_writereg(self, &stge_mii_bitbang_ops, phy, reg, val);
+	return mii_bitbang_writereg(self, &stge_mii_bitbang_ops, phy, reg,
+	    val);
 }
 
 /*

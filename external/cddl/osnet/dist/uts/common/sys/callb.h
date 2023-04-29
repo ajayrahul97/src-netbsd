@@ -26,8 +26,7 @@
 #ifndef	_SYS_CALLB_H
 #define	_SYS_CALLB_H
 
-#include <sys/t_lock.h>
-#include <sys/thread.h>
+#include <sys/kcondvar.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -131,12 +130,28 @@ typedef struct callb_cpr {
  * Note: lockp is the lock to protect the callb_cpr_t (cp) structure
  * later on.  No lock held is needed for this initialization.
  */
+#ifdef __NetBSD__
 #define	CALLB_CPR_INIT(cp, lockp, func, name)	{			\
+		/* XXXNETBSD set thread name */				\
 		bzero((caddr_t)(cp), sizeof (callb_cpr_t));		\
 		(cp)->cc_lockp = lockp;					\
 		(cp)->cc_id = callb_add(func, (void *)(cp),		\
 			CB_CL_CPR_DAEMON, name);			\
+		cv_init(&(cp)->cc_callb_cv, NULL, CV_DEFAULT, NULL);	\
+		cv_init(&(cp)->cc_stop_cv, NULL, CV_DEFAULT, NULL);	\
 	}
+#else
+#define	CALLB_CPR_INIT(cp, lockp, func, name)	{			\
+		strlcpy(curthread->td_name, (name),			\
+		    sizeof(curthread->td_name));			\
+		bzero((caddr_t)(cp), sizeof (callb_cpr_t));		\
+		(cp)->cc_lockp = lockp;					\
+		(cp)->cc_id = callb_add(func, (void *)(cp),		\
+			CB_CL_CPR_DAEMON, name);			\
+		cv_init(&(cp)->cc_callb_cv, NULL, CV_DEFAULT, NULL);	\
+		cv_init(&(cp)->cc_stop_cv, NULL, CV_DEFAULT, NULL);	\
+	}
+#endif
 
 #ifndef __lock_lint
 #define	CALLB_CPR_ASSERT(cp)	ASSERT(MUTEX_HELD((cp)->cc_lockp));
@@ -192,7 +207,6 @@ typedef struct callb_cpr {
 	}
 
 extern callb_cpr_t callb_cprinfo_safe;
-extern void	callb_init(void);
 extern callb_id_t callb_add(boolean_t  (*)(void *, int), void *, int, char *);
 extern callb_id_t callb_add_thread(boolean_t (*)(void *, int),
     void *, int, char *, kthread_id_t);
@@ -204,6 +218,10 @@ extern boolean_t callb_generic_cpr_safe(void *, int);
 extern boolean_t callb_is_stopped(kthread_id_t, caddr_t *);
 extern void	callb_lock_table(void);
 extern void	callb_unlock_table(void);
+#ifdef __NetBSD__
+extern void	callb_init(void *);
+extern void	callb_fini(void *);
+#endif
 #endif
 
 #ifdef	__cplusplus

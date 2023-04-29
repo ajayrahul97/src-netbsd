@@ -1,4 +1,4 @@
-/*	$NetBSD: lock_stubs_llsc.S,v 1.6 2016/07/27 09:32:35 skrll Exp $	*/
+/*	$NetBSD: lock_stubs_llsc.S,v 1.9 2019/04/06 03:06:26 thorpej Exp $	*/
 
 /*-
  * Copyright (c) 2007 The NetBSD Foundation, Inc.
@@ -15,7 +15,7 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- *      
+ *
  * THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
@@ -37,7 +37,7 @@
 
 #include <machine/asm.h>
 
-RCSID("$NetBSD: lock_stubs_llsc.S,v 1.6 2016/07/27 09:32:35 skrll Exp $")
+RCSID("$NetBSD: lock_stubs_llsc.S,v 1.9 2019/04/06 03:06:26 thorpej Exp $")
 
 #include "assym.h"
 
@@ -120,10 +120,10 @@ STATIC_LEAF(llsc_atomic_cas_uint)
 END(llsc_atomic_cas_uint)
 
 /*
- * int llsc_ucas_uint(volatile unsigned int *ptr, unsigned int old,
- *	unsigned int new, unsigned int *ret)
+ * int llsc_ucas_32(volatile uint32_t *ptr, uint32_t old,
+ *	uint32_t new, uint32_t *ret)
  */
-STATIC_LEAF(llsc_ucas_uint)
+STATIC_LEAF(llsc_ucas_32)
 	.set at
 	PTR_LA	v0, _C_LABEL(llsc_ucaserr)
 	.set noat
@@ -133,25 +133,25 @@ STATIC_LEAF(llsc_ucas_uint)
 	 nop
 	move	v0, zero
 
-1:	INT_LL	t0, 0(a0)
-	 nop
+1:	ll	t0, 0(a0)
 	bne	t0, a1, 2f
 	 move	t1, a2
-	INT_SC	t1, 0(a0)
+	sc	t1, 0(a0)
 	beqz	t1, 1b
 	 nop
 	SYNC
 
 2:	PTR_S	zero, PCB_ONFAULT(v1)
 	j	ra
-	 INT_S	t0, 0(a3)
-END(llsc_ucas_uint)
+	 sw	t0, 0(a3)
+END(llsc_ucas_32)
 
+#ifdef _LP64
 /*
- * int ucas_ulong(volatile unsigned long *ptr, unsigned long old,
- *	unsigned long new, unsigned long *ret)
+ * int llsc_ucas_64(volatile uint64_t *ptr, uint64_t old,
+ *	uint64_t new, uint64_t *ret)
  */
-STATIC_LEAF(llsc_ucas_ulong)
+STATIC_LEAF(llsc_ucas_64)
 	.set at
 	PTR_LA	v0, _C_LABEL(llsc_ucaserr)
 	.set noat
@@ -161,19 +161,19 @@ STATIC_LEAF(llsc_ucas_ulong)
 	 nop
 	move	v0, zero
 
-1:	LONG_LL	t0, 0(a0)
-	 nop
+1:	lld	t0, 0(a0)
 	bne	t0, a1, 2f
 	 move	t1, a2
-	LONG_SC	t1, 0(a0)
+	scd	t1, 0(a0)
 	beqz	t1, 1b
 	 nop
 	SYNC
 
 2:	PTR_S	zero, PCB_ONFAULT(v1)
 	j	ra
-	 LONG_S	t0, 0(a3)
-END(llsc_ucas_ulong)
+	 sd	t0, 0(a3)
+END(llsc_ucas_64)
+#endif /* _LP64 */
 
 STATIC_LEAF_NOPROFILE(llsc_ucaserr)
 	PTR_S	zero, PCB_ONFAULT(v1)		# reset fault handler
@@ -188,7 +188,6 @@ END(llsc_ucaserr)
  */
 STATIC_LEAF(llsc_mutex_enter)
 	PTR_LL	t0, MTX_OWNER(a0)
-	nop
 1:
 	bnez	t0, 2f
 	 move	t2, MIPS_CURLWP
@@ -252,7 +251,6 @@ STATIC_NESTED(llsc_mutex_spin_enter, CALLFRAME_SIZ, ra)
 	 */
 1:
 	INT_L	ta2, CPU_INFO_MTX_COUNT(t2)
-	nop
 	INT_ADDU ta3, ta2, -1
 	INT_S	ta3, CPU_INFO_MTX_COUNT(t2)
 	bltz	ta2, 2f
@@ -262,7 +260,6 @@ STATIC_NESTED(llsc_mutex_spin_enter, CALLFRAME_SIZ, ra)
 #ifdef PARANOIA
 	INT_L	ta1, CPU_INFO_MTX_OLDSPL(t2)
 	INT_L	ta2, CPU_INFO_CPL(t2)	# get updated CPL
-	nop
 	sltu	v0, ta2, ta0		# v0 = cpl < mtx_ipl
 	sltu	v1, ta2, ta1		# v1 = cpl < oldspl
 	sll	v0, 1
@@ -272,7 +269,6 @@ STATIC_NESTED(llsc_mutex_spin_enter, CALLFRAME_SIZ, ra)
 #endif /* PARANOIA */
 #if defined(FULL)
 	INT_LL	t3, MTX_LOCK(t0)
-	nop
 3:
 	bnez	t3, 4f
 	 li	t1, 1
@@ -297,7 +293,6 @@ LEAF(llsc_mutex_spin_exit)
 	PTR_L	t2, L_CPU(MIPS_CURLWP)
 #if defined(DIAGNOSTIC)
 	INT_L	t0, MTX_LOCK(a0)
-	nop
 	beqz	t0, 2f
 	 nop
 	INT_S	zero, MTX_LOCK(a0)
@@ -310,7 +305,6 @@ LEAF(llsc_mutex_spin_exit)
 	 */
 #ifdef PARANOIA
 	INT_L	a2, MTX_IPL(a0)
-	nop
 #endif
 	INT_L	a0, CPU_INFO_MTX_OLDSPL(t2)
 
@@ -318,7 +312,6 @@ LEAF(llsc_mutex_spin_exit)
 	 * Increment the mutex count
 	 */
 	INT_L	t0, CPU_INFO_MTX_COUNT(t2)
-	nop
 	INT_ADDU t0, t0, 1
 	INT_S	t0, CPU_INFO_MTX_COUNT(t2)
 
@@ -367,8 +360,12 @@ END(llsc_mutex_spin_exit)
 EXPORT(mips_llsc_locore_atomicvec)
 	PTR_WORD 	llsc_atomic_cas_uint
 	PTR_WORD 	llsc_atomic_cas_ulong
-	PTR_WORD	llsc_ucas_uint
-	PTR_WORD	llsc_ucas_ulong
+	PTR_WORD	llsc_ucas_32
+#ifdef _LP64
+	PTR_WORD	llsc_ucas_64
+#else
+			0
+#endif /* _LP64 */
 #ifdef LOCKDEBUG
 	PTR_WORD	mutex_vector_enter
 	PTR_WORD	mutex_vector_exit

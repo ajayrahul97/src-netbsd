@@ -1,4 +1,4 @@
-/*	$NetBSD: sysv_msg.c,v 1.70 2015/11/06 02:26:42 pgoyette Exp $	*/
+/*	$NetBSD: sysv_msg.c,v 1.74.4.1 2019/10/15 19:05:38 martin Exp $	*/
 
 /*-
  * Copyright (c) 1999, 2006, 2007 The NetBSD Foundation, Inc.
@@ -50,7 +50,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: sysv_msg.c,v 1.70 2015/11/06 02:26:42 pgoyette Exp $");
+__KERNEL_RCSID(0, "$NetBSD: sysv_msg.c,v 1.74.4.1 2019/10/15 19:05:38 martin Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_sysv.h"
@@ -93,7 +93,7 @@ extern int kern_has_sysvmsg;
 
 SYSCTL_SETUP_PROTO(sysctl_ipc_msg_setup);
 
-void
+int
 msginit(struct sysctllog **clog)
 {
 	int i, sz;
@@ -109,12 +109,14 @@ msginit(struct sysctllog **clog)
 	while (i < 1024 && i != msginfo.msgssz)
 		i <<= 1;
 	if (i != msginfo.msgssz) {
-		panic("msginfo.msgssz = %d, not a small power of 2",
+		printf("msginfo.msgssz = %d, not a small power of 2",
 		    msginfo.msgssz);
+		return EINVAL;
 	}
 
 	if (msginfo.msgseg > 32767) {
-		panic("msginfo.msgseg = %d > 32767", msginfo.msgseg);
+		printf("msginfo.msgseg = %d > 32767", msginfo.msgseg);
+		return EINVAL;
 	}
 
 	/* Allocate the wired memory for our structures */
@@ -124,8 +126,10 @@ msginit(struct sysctllog **clog)
 	    ALIGN(msginfo.msgmni * sizeof(kmsq_t));
 	sz = round_page(sz);
 	v = uvm_km_alloc(kernel_map, sz, 0, UVM_KMF_WIRED|UVM_KMF_ZERO);
-	if (v == 0)
-		panic("sysv_msg: cannot allocate memory");
+	if (v == 0) {
+		printf("sysv_msg: cannot allocate memory");
+		return ENOMEM;
+	}
 	msgpool = (void *)v;
 	msgmaps = (void *)((uintptr_t)msgpool + ALIGN(msginfo.msgmax));
 	msghdrs = (void *)((uintptr_t)msgmaps +
@@ -167,6 +171,7 @@ msginit(struct sysctllog **clog)
 	if (clog)
 		sysctl_ipc_msg_setup(clog);
 #endif
+	return 0;
 }
 
 int
@@ -195,6 +200,7 @@ msgfini(void)
 	sz = round_page(sz);
 	uvm_km_free(kernel_map, v, sz, UVM_KMF_WIRED);
 
+	cv_destroy(&msg_realloc_cv);
 	mutex_exit(&msgmutex);
 	mutex_destroy(&msgmutex);
 
@@ -314,8 +320,8 @@ msgrealloc(int newmsgmni, int newmsgseg)
 		memcpy(nmptr, mptr, sizeof(struct msqid_ds));
 
 		/*
-		 * Go through the message headers, and and copy each
-		 * one by taking the new ones, and thus defragmenting.
+		 * Go through the message headers, and copy each one
+		 * by taking the new ones, and thus defragmenting.
 		 */
 		nmsghdr = pmsghdr = NULL;
 		msghdr = mptr->_msg_first;
@@ -565,7 +571,16 @@ msgctl1(struct lwp *l, int msqid, int cmd, struct msqid_ds *msqbuf)
 			MSG_PRINTF(("requester doesn't have read access\n"));
 			break;
 		}
-		memcpy(msqbuf, msqptr, sizeof(struct msqid_ds));
+		memset(msqbuf, 0, sizeof *msqbuf);
+		msqbuf->msg_perm = msqptr->msg_perm;
+		msqbuf->msg_perm.mode &= 0777;
+		msqbuf->msg_qnum = msqptr->msg_qnum;
+		msqbuf->msg_qbytes = msqptr->msg_qbytes;
+		msqbuf->msg_lspid = msqptr->msg_lspid;
+		msqbuf->msg_lrpid = msqptr->msg_lrpid;
+		msqbuf->msg_stime = msqptr->msg_stime;
+		msqbuf->msg_rtime = msqptr->msg_rtime;
+		msqbuf->msg_ctime = msqptr->msg_ctime;
 		break;
 
 	default:
@@ -1089,6 +1104,7 @@ restart:
 				 */
 
 				if (msgtyp != msghdr->msg_type &&
+				    msgtyp != LONG_MIN &&
 				    msghdr->msg_type > -msgtyp)
 					continue;
 

@@ -1,4 +1,4 @@
-/*	$NetBSD: route.c,v 1.154 2016/04/04 07:37:07 ozaki-r Exp $	*/
+/*	$NetBSD: route.c,v 1.160.2.4 2020/01/24 20:13:45 martin Exp $	*/
 
 /*
  * Copyright (c) 1983, 1989, 1991, 1993
@@ -39,7 +39,7 @@ __COPYRIGHT("@(#) Copyright (c) 1983, 1989, 1991, 1993\
 #if 0
 static char sccsid[] = "@(#)route.c	8.6 (Berkeley) 4/28/95";
 #else
-__RCSID("$NetBSD: route.c,v 1.154 2016/04/04 07:37:07 ozaki-r Exp $");
+__RCSID("$NetBSD: route.c,v 1.160.2.4 2020/01/24 20:13:45 martin Exp $");
 #endif
 #endif /* not lint */
 
@@ -54,6 +54,7 @@ __RCSID("$NetBSD: route.c,v 1.154 2016/04/04 07:37:07 ozaki-r Exp $");
 #include <net/if_dl.h>
 #include <net80211/ieee80211_netbsd.h>
 #include <netinet/in.h>
+#include <netinet/in_var.h>
 #include <netatalk/at.h>
 #include <netmpls/mpls.h>
 #include <arpa/inet.h>
@@ -68,6 +69,7 @@ __RCSID("$NetBSD: route.c,v 1.154 2016/04/04 07:37:07 ozaki-r Exp $");
 #include <time.h>
 #include <paths.h>
 #include <err.h>
+#include <util.h>
 
 #include "keywords.h"
 #include "extern.h"
@@ -108,7 +110,7 @@ static char *netmask_string(const struct sockaddr *, int, int);
 static int prefixlen(const char *, struct sou *);
 #ifndef SMALL
 static void interfaces(void);
-__dead static void monitor(void);
+static void monitor(int, char * const *);
 static int print_getmsg(struct rt_msghdr *, int, struct sou *);
 static const char *linkstate(struct if_msghdr *);
 static sup readtag(sup, const char *);
@@ -236,7 +238,7 @@ main(int argc, char * const *argv)
 
 #ifndef SMALL
 	case K_MONITOR:
-		monitor();
+		monitor(argc, argv);
 		return 0;
 
 #endif /* SMALL */
@@ -340,8 +342,10 @@ flushroutes(int argc, char * const argv[], int doall)
 			continue;
 		rtm->rtm_type = RTM_DELETE;
 		rtm->rtm_seq = seqno;
-		if ((rlen = prog_write(sock, next,
-		    rtm->rtm_msglen)) < 0) {
+		do {
+			rlen = prog_write(sock, next, rtm->rtm_msglen);
+		} while (rlen == -1 && errno == ENOBUFS);
+		if (rlen == -1) {
 			warnx("writing to routing socket: %s",
 			    route_strerror(errno));
 			return 1;
@@ -1105,22 +1109,43 @@ interfaces(void)
 }
 
 static void
-monitor(void)
+monitor(int argc, char * const *argv)
 {
-	int n;
+	int i, n;
 	union {
 		char msg[2048];
 		struct rt_msghdr hdr;
 	} u;
+	int count = 0;
+
+	/* usage: route monitor [-c <count>] */
+
+	/* eat "monitor" */
+	argc -= 1;
+	argv += 1;
+
+	/* parse [-c <count>] */
+	if (argc > 0) {
+		if (argc != 2)
+			usage(argv[0]);
+		if (strcmp(argv[0], "-c") != 0)
+			usage(argv[0]);
+
+		count = atoi(argv[1]);
+	}
 
 	verbose = 1;
 	if (debugonly) {
 		interfaces();
 		exit(0);
 	}
-	for(;;) {
+	for(i = 0; count == 0 || i < count; i++) {
 		time_t now;
 		n = prog_read(sock, &u, sizeof(u));
+		if (n == -1) {
+			warn("read");
+			continue;
+		}
 		now = time(NULL);
 		(void)printf("got message of size %d on %s", n, ctime(&now));
 		print_rtmsg(&u.hdr, n);
@@ -1196,7 +1221,10 @@ rtmsg(int cmd, int flags, struct sou *soup)
 	}
 	if (debugonly)
 		return 0;
-	if ((rlen = prog_write(sock, (char *)&m_rtmsg, l)) < 0) {
+	do {
+		rlen = prog_write(sock, (char *)&m_rtmsg, l);
+	} while (rlen == -1 && errno == ENOBUFS);
+	if (rlen == -1) {
 		warnx("writing to routing socket: %s", route_strerror(errno));
 		return -1;
 	}
@@ -1274,14 +1302,13 @@ const char * const msgtypes[] = {
 	[RTM_CHGADDR] = "RTM_CHGADDR: address being changed on iface",
 };
 
-const char metricnames[] =
-"\011pksent\010rttvar\7rtt\6ssthresh\5sendpipe\4recvpipe\3expire\2hopcount\1mtu";
-const char routeflags[] =
-"\1UP\2GATEWAY\3HOST\4REJECT\5DYNAMIC\6MODIFIED\7DONE\010MASK_PRESENT\011CONNECTED\012XRESOLVE\013LLINFO\014STATIC\015BLACKHOLE\016CLONED\017PROTO2\020PROTO1\023LOCAL\024BROADCAST";
-const char ifnetflags[] =
-"\1UP\2BROADCAST\3DEBUG\4LOOPBACK\5PTP\6NOTRAILERS\7RUNNING\010NOARP\011PPROMISC\012ALLMULTI\013OACTIVE\014SIMPLEX\015LINK0\016LINK1\017LINK2\020MULTICAST";
-const char addrnames[] =
-"\1DST\2GATEWAY\3NETMASK\4GENMASK\5IFP\6IFA\7AUTHOR\010BRD\011TAG";
+const char unknownflags[] = "\020";
+const char metricnames[] = RTVBITS;
+const char routeflags[] = RTFBITS;
+const char ifnetflags[] = IFFBITS;
+const char in_ifflags[] = IN_IFFBITS;
+const char in6_ifflags[] = IN6_IFFBITS;
+const char addrnames[] = RTABITS;
 
 
 #ifndef SMALL
@@ -1348,8 +1375,22 @@ print_rtmsg(struct rt_msghdr *rtm, int msglen)
 	case RTM_DELADDR:
 	case RTM_CHGADDR:
 		ifam = (struct ifa_msghdr *)rtm;
-		(void)printf("metric %d, flags: ", ifam->ifam_metric);
-		bprintf(stdout, ifam->ifam_flags, routeflags);
+		(void)printf("pid %d, metric %d, addrflags: ",
+		    ifam->ifam_pid, ifam->ifam_metric);
+		struct sockaddr *sa = (struct sockaddr *)(ifam + 1);
+		const char *bits;
+		switch (sa->sa_family) {
+		case AF_INET:
+			bits = in_ifflags;
+			break;
+		case AF_INET6:
+			bits = in6_ifflags;
+			break;
+		default:
+			bits = unknownflags;
+			break;
+		}
+		bprintf(stdout, ifam->ifam_addrflags, bits);
 		pmsg_addrs((char *)(ifam + 1), ifam->ifam_addrs);
 		break;
 	case RTM_IEEE80211:
@@ -1435,11 +1476,17 @@ print_rtmsg(struct rt_msghdr *rtm, int msglen)
 		}
 		printf("\n");
 		break;
-	default:
+	case RTM_ADD:		/* FALLTHROUGH */
+	case RTM_CHANGE:	/* FALLTHROUGH */
+	case RTM_DELETE:	/* FALLTHROUGH */
+	case RTM_GET:		/* FALLTHROUGH */
+	case RTM_LOSING:	/* FALLTHROUGH */
+	case RTM_MISS:
 		(void)printf("pid %d, seq %d, errno %d, flags: ",
 			rtm->rtm_pid, rtm->rtm_seq, rtm->rtm_errno);
 		bprintf(stdout, rtm->rtm_flags, routeflags);
 		pmsg_common(rtm);
+		break;
 	}
 }
 
@@ -1641,30 +1688,10 @@ pmsg_addrs(const char *cp, int addrs)
 static void
 bprintf(FILE *fp, int b, const char *f)
 {
-	int i;
-	int gotsome = 0;
-	const uint8_t *s = (const uint8_t *)f;
+	char buf[1024];
 
-	if (b == 0) {
-		fputs("none", fp);
-		return;
-	}
-	while ((i = *s++) != 0) {
-		if (b & (1 << (i-1))) {
-			if (gotsome == 0)
-				i = '<';
-			else
-				i = ',';
-			(void)putc(i, fp);
-			gotsome = 1;
-			for (; (i = *s) > 32; s++)
-				(void)putc(i, fp);
-		} else
-			while (*s > 32)
-				s++;
-	}
-	if (gotsome)
-		(void)putc('>', fp);
+	snprintb(buf, sizeof(buf), f, b);
+	fputs(buf, fp);
 }
 
 int

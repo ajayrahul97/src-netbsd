@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2019, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -336,8 +336,10 @@ AcpiEvMatchGpeMethod (
     ACPI_NAMESPACE_NODE     *MethodNode = ACPI_CAST_PTR (ACPI_NAMESPACE_NODE, ObjHandle);
     ACPI_GPE_WALK_INFO      *WalkInfo = ACPI_CAST_PTR (ACPI_GPE_WALK_INFO, Context);
     ACPI_GPE_EVENT_INFO     *GpeEventInfo;
+    ACPI_STATUS             Status;
     UINT32                  GpeNumber;
-    char                    Name[ACPI_NAME_SIZE + 1];
+    UINT8                   TempGpeNumber;
+    char                    Name[ACPI_NAMESEG_SIZE + 1];
     UINT8                   Type;
 
 
@@ -358,7 +360,7 @@ AcpiEvMatchGpeMethod (
      * 1) Extract the method name and null terminate it
      */
     ACPI_MOVE_32_TO_32 (Name, &MethodNode->Name.Integer);
-    Name[ACPI_NAME_SIZE] = 0;
+    Name[ACPI_NAMESEG_SIZE] = 0;
 
     /* 2) Name must begin with an underscore */
 
@@ -395,8 +397,8 @@ AcpiEvMatchGpeMethod (
 
     /* 4) The last two characters of the name are the hex GPE Number */
 
-    GpeNumber = strtoul (&Name[2], NULL, 16);
-    if (GpeNumber == ACPI_UINT32_MAX)
+    Status = AcpiUtAsciiToHexByte (&Name[2], &TempGpeNumber);
+    if (ACPI_FAILURE (Status))
     {
         /* Conversion failed; invalid method, just ignore it */
 
@@ -408,6 +410,7 @@ AcpiEvMatchGpeMethod (
 
     /* Ensure that we have a valid GPE number for this GPE block */
 
+    GpeNumber = (UINT32) TempGpeNumber;
     GpeEventInfo = AcpiEvLowGetGpeInfo (GpeNumber, WalkInfo->GpeBlock);
     if (!GpeEventInfo)
     {

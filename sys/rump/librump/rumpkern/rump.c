@@ -1,4 +1,4 @@
-/*	$NetBSD: rump.c,v 1.329 2016/03/08 14:30:48 joerg Exp $	*/
+/*	$NetBSD: rump.c,v 1.334 2019/05/17 03:34:26 ozaki-r Exp $	*/
 
 /*
  * Copyright (c) 2007-2011 Antti Kantee.  All Rights Reserved.
@@ -26,7 +26,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: rump.c,v 1.329 2016/03/08 14:30:48 joerg Exp $");
+__KERNEL_RCSID(0, "$NetBSD: rump.c,v 1.334 2019/05/17 03:34:26 ozaki-r Exp $");
 
 #include <sys/systm.h>
 #define ELFSIZE ARCH_ELFSIZE
@@ -65,6 +65,7 @@ __KERNEL_RCSID(0, "$NetBSD: rump.c,v 1.329 2016/03/08 14:30:48 joerg Exp $");
 #include <sys/sysctl.h>
 #include <sys/syscall.h>
 #include <sys/syscallvar.h>
+#include <sys/threadpool.h>
 #include <sys/timetc.h>
 #include <sys/tty.h>
 #include <sys/uidinfo.h>
@@ -73,6 +74,7 @@ __KERNEL_RCSID(0, "$NetBSD: rump.c,v 1.329 2016/03/08 14:30:48 joerg Exp $");
 #include <sys/cprng.h>
 #include <sys/rnd.h>
 #include <sys/ktrace.h>
+#include <sys/psref.h>
 
 #include <rump-sys/kern.h>
 #include <rump-sys/dev.h>
@@ -110,6 +112,8 @@ static struct lwp *bootlwp;
 static  char rump_msgbuf[16*1024] __aligned(256);
 
 bool rump_ttycomponent = false;
+
+pool_cache_t pnbuf_cache;
 
 static void
 rump_aiodone_worker(struct work *wk, void *dummy)
@@ -221,7 +225,7 @@ RUMP_COMPONENT(RUMP_COMPONENT_POSTINIT)
 #endif /* RUMP_USE_CTOR */
 
 int
-rump_init(void)
+rump_init(void (*cpuinit_callback) (void))
 {
 	char buf[256];
 	struct timespec ts;
@@ -301,6 +305,7 @@ rump_init(void)
 	callout_startup();
 
 	kprintf_init();
+	percpu_init();
 	pserialize_init();
 
 	kauth_init();
@@ -340,6 +345,11 @@ rump_init(void)
 	lwpinit_specificdata();
 	lwp_initspecific(&lwp0);
 
+	/* Must be called after lwpinit_specificdata */
+	psref_init();
+
+	threadpools_init();
+
 	loginit();
 
 	rump_biglock_init();
@@ -351,7 +361,6 @@ rump_init(void)
 	rump_schedule();
 	bootlwp = curlwp;
 
-	percpu_init();
 	inittimecounter();
 	ntp_init();
 
@@ -391,6 +400,11 @@ rump_init(void)
 
 	/* Once all CPUs are detected, initialize the per-CPU cprng_fast.  */
 	cprng_fast_init();
+
+	mp_online = true;
+
+	if (cpuinit_callback)
+		cpuinit_callback();
 
 	/* CPUs are up.  allow kernel threads to run */
 	rump_thread_allow(NULL);

@@ -1,4 +1,4 @@
-/*	$NetBSD: kern_module_vfs.c,v 1.14 2016/03/15 02:59:24 pgoyette Exp $	*/
+/*	$NetBSD: kern_module_vfs.c,v 1.17 2019/01/27 02:08:43 pgoyette Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -34,7 +34,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: kern_module_vfs.c,v 1.14 2016/03/15 02:59:24 pgoyette Exp $");
+__KERNEL_RCSID(0, "$NetBSD: kern_module_vfs.c,v 1.17 2019/01/27 02:08:43 pgoyette Exp $");
 
 #define _MODULE_INTERNAL
 #include <sys/param.h>
@@ -106,7 +106,7 @@ module_load_vfs(const char *name, int flags, bool autoload,
 	/*
 	 * Load and process <module>.plist if it exists.
 	 */
-	if (((flags & MODCTL_NO_PROP) == 0 && filedictp) || autoload) {
+	if ((!ISSET(flags, MODCTL_NO_PROP) && filedictp) || autoload) {
 		error = module_load_plist_vfs(path, nochroot, &moduledict);
 		if (error != 0) {
 			module_print("plist load returned error %d for `%s'",
@@ -124,7 +124,7 @@ module_load_vfs(const char *name, int flags, bool autoload,
 			}
 		}
 		if (error == 0) {	/* can get here if error == ENOENT */
-			if ((flags & MODCTL_NO_PROP) == 0 && filedictp)
+			if (!ISSET(flags, MODCTL_NO_PROP) && filedictp)
 				*filedictp = moduledict;
 			else 
 				prop_object_release(moduledict);
@@ -162,7 +162,7 @@ module_load_plist_vfs(const char *modpath, const bool nochroot,
 	base = NULL;
 
 	proppath = PNBUF_GET();
-	strcpy(proppath, modpath);
+	strlcpy(proppath, modpath, MAXPATHLEN);
 	pathlen = strlen(proppath);
 	if ((pathlen >= 6) && (strcmp(&proppath[pathlen - 5], ".kmod") == 0)) {
 		strcpy(&proppath[pathlen - 5], ".plist");
@@ -198,11 +198,6 @@ module_load_plist_vfs(const char *modpath, const bool nochroot,
 	}
 
 	base = kmem_alloc(plistsize, KM_SLEEP);
-	if (base == NULL) {
-		error = ENOMEM;
-		goto out3;
-	}
-
 	error = vn_rdwr(UIO_READ, nd.ni_vp, base, sb.st_size, 0,
 	    UIO_SYSSPACE, IO_NODELOCKED, curlwp->l_cred, &resid, curlwp);
 	*((uint8_t *)base + sb.st_size) = '\0';

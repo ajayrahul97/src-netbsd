@@ -1,4 +1,4 @@
-/*	$NetBSD: pmap.h,v 1.17 2011/06/30 00:52:59 matt Exp $	*/
+/*	$NetBSD: pmap.h,v 1.19 2019/07/17 08:39:03 skrll Exp $	*/
 
 /*
  * Copyright 2001 Wasabi Systems, Inc.
@@ -82,7 +82,7 @@
 #define KERNEL_PID	1	/* TLB PID to use for kernel translation */
 
 /*
- * A TTE is a 16KB or greater TLB entry w/size and endiannes bits
+ * A TTE is a 16KB or greater TLB entry w/size and endianness bits
  * stuffed in the (unused) low bits of the PA.
  */
 #define	TTE_PA_MASK		0xffffc000
@@ -172,7 +172,7 @@ bool pmap_check_attr(struct vm_page *, u_int, int);
 void pmap_real_memory(paddr_t *, psize_t *);
 int pmap_tlbmiss(vaddr_t va, int ctx);
 
-static inline void
+static __inline void
 pmap_remove_all(struct pmap *pmap)
 {
 	/* Nothing. */
@@ -194,9 +194,9 @@ void pmap_procwr(struct proc *, vaddr_t, size_t);
 #define	PMAP_MAP_POOLPAGE(pa)	(pa)
 #define	PMAP_UNMAP_POOLPAGE(pa)	(pa)
 
-static inline paddr_t vtophys(vaddr_t);
+static __inline paddr_t vtophys(vaddr_t);
 
-static inline paddr_t
+static __inline paddr_t
 vtophys(vaddr_t va)
 {
 	paddr_t pa;

@@ -1,4 +1,4 @@
-/*	$NetBSD: urio.c,v 1.44 2016/07/07 06:55:42 msaitoh Exp $	*/
+/*	$NetBSD: urio.c,v 1.48 2019/05/05 03:17:54 mrg Exp $	*/
 
 /*
  * Copyright (c) 2000 The NetBSD Foundation, Inc.
@@ -36,7 +36,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: urio.c,v 1.44 2016/07/07 06:55:42 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: urio.c,v 1.48 2019/05/05 03:17:54 mrg Exp $");
+
+#ifdef _KERNEL_OPT
+#include "opt_usb.h"
+#endif
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -57,6 +61,8 @@ __KERNEL_RCSID(0, "$NetBSD: urio.c,v 1.44 2016/07/07 06:55:42 msaitoh Exp $");
 
 #include <dev/usb/usbdevs.h>
 #include <dev/usb/urio.h>
+
+#include "ioconf.h"
 
 #ifdef URIO_DEBUG
 #define DPRINTF(x)	if (uriodebug) printf x
@@ -97,7 +103,7 @@ const struct cdevsw urio_cdevsw = {
 
 
 struct urio_softc {
- 	device_t		sc_dev;
+	device_t		sc_dev;
 	struct usbd_device *	sc_udev;
 	struct usbd_interface *	sc_iface;
 
@@ -126,7 +132,7 @@ int	urio_match(device_t, cfdata_t, void *);
 void	urio_attach(device_t, device_t, void *);
 int	urio_detach(device_t, int);
 int	urio_activate(device_t, enum devact);
-extern struct cfdriver urio_cd;
+
 CFATTACH_DECL_NEW(urio, sizeof(struct urio_softc), urio_match, urio_attach,
     urio_detach, urio_activate);
 
@@ -351,7 +357,7 @@ urioread(dev_t dev, struct uio *uio, int flag)
 
 	sc->sc_refcnt++;
 
-	while ((n = min(URIO_BSIZE, uio->uio_resid)) != 0) {
+	while ((n = uimin(URIO_BSIZE, uio->uio_resid)) != 0) {
 		DPRINTFN(1, ("urioread: start transfer %d bytes\n", n));
 		tn = n;
 		err = usbd_bulk_transfer(xfer, sc->sc_in_pipe, 0,
@@ -405,7 +411,7 @@ uriowrite(dev_t dev, struct uio *uio, int flag)
 	bufp = usbd_get_buffer(xfer);
 	sc->sc_refcnt++;
 
-	while ((n = min(URIO_BSIZE, uio->uio_resid)) != 0) {
+	while ((n = uimin(URIO_BSIZE, uio->uio_resid)) != 0) {
 		error = uiomove(bufp, n, uio);
 		if (error)
 			break;

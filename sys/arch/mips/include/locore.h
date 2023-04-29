@@ -1,4 +1,4 @@
-/* $NetBSD: locore.h,v 1.100 2016/07/11 16:15:35 matt Exp $ */
+/* $NetBSD: locore.h,v 1.104 2019/04/06 03:06:26 thorpej Exp $ */
 
 /*
  * This file should not be included by MI code!!!
@@ -32,6 +32,8 @@
 #include "opt_cputype.h"
 #endif
 
+#ifndef __ASSEMBLER__
+
 #include <sys/cpu.h>
 
 #include <mips/mutex.h>
@@ -45,6 +47,7 @@ typedef uint32_t pt_entry_t;
 #endif
 
 #include <uvm/pmap/tlb.h>
+#endif /* !__ASSEMBLER__ */
 
 #ifdef _KERNEL
 
@@ -90,6 +93,9 @@ typedef uint32_t pt_entry_t;
 #error MIPS1 does not support non-4KB page sizes.
 #endif
 
+/* XXX some .S files look for MIPS3_PLUS */
+#ifndef __ASSEMBLER__
+
 /* XXX simonb
  * Should the following be in a cpu_info type structure?
  * And how many of these are per-cpu vs. per-system?  (Ie,
@@ -121,6 +127,8 @@ struct mips_options {
 	uint32_t mips3_tlb_pg_mask;
 #endif
 };
+
+#endif /* !__ASSEMBLER__ */
 
 /*
  * Macros to find the CPU architecture we're on at run-time,
@@ -308,6 +316,8 @@ struct mips_options {
 #define	MIPS_HAS_CLOCK	(mips_options.mips_cpu_arch >= CPU_ARCH_MIPS3)
 
 #endif /* run-time test */
+
+#ifndef __ASSEMBLER__
 
 struct tlbmask;
 struct trapframe;
@@ -575,8 +585,10 @@ typedef struct  {
 typedef struct {
 	u_int	(*lav_atomic_cas_uint)(volatile u_int *, u_int, u_int);
 	u_long	(*lav_atomic_cas_ulong)(volatile u_long *, u_long, u_long);
-	int	(*lav_ucas_uint)(volatile u_int *, u_int, u_int, u_int *);
-	int	(*lav_ucas_ulong)(volatile u_long *, u_long, u_long, u_long *);
+	int	(*lav_ucas_32)(volatile uint32_t *, uint32_t, uint32_t,
+			       uint32_t *);
+	int	(*lav_ucas_64)(volatile uint64_t *, uint64_t, uint64_t,
+			       uint64_t *);
 	void	(*lav_mutex_enter)(kmutex_t *);
 	void	(*lav_mutex_exit)(kmutex_t *);
 	void	(*lav_mutex_spin_enter)(kmutex_t *);
@@ -634,101 +646,29 @@ extern kcpuset_t *cpus_halted;
 #endif
 
 /* copy.S */
+uint32_t mips_ufetch32(const void *);
+int	mips_ustore32_isync(void *, uint32_t);
+
 int32_t kfetch_32(volatile uint32_t *, uint32_t);
-int8_t	ufetch_int8(void *);
-int16_t	ufetch_int16(void *);
-int32_t ufetch_int32(void *);
-uint8_t	ufetch_uint8(void *);
-uint16_t ufetch_uint16(void *);
-uint32_t ufetch_uint32(void *);
-int8_t	ufetch_int8_intrsafe(void *);
-int16_t	ufetch_int16_intrsafe(void *);
-int32_t ufetch_int32_intrsafe(void *);
-uint8_t	ufetch_uint8_intrsafe(void *);
-uint16_t ufetch_uint16_intrsafe(void *);
-uint32_t ufetch_uint32_intrsafe(void *);
-#ifdef _LP64
-int64_t ufetch_int64(void *);
-uint64_t ufetch_uint64(void *);
-int64_t ufetch_int64_intrsafe(void *);
-uint64_t ufetch_uint64_intrsafe(void *);
-#endif
-char	ufetch_char(void *);
-short	ufetch_short(void *);
-int	ufetch_int(void *);
-long	ufetch_long(void *);
-char	ufetch_char_intrsafe(void *);
-short	ufetch_short_intrsafe(void *);
-int	ufetch_int_intrsafe(void *);
-long	ufetch_long_intrsafe(void *);
-
-u_char	ufetch_uchar(void *);
-u_short	ufetch_ushort(void *);
-u_int	ufetch_uint(void *);
-u_long	ufetch_ulong(void *);
-u_char	ufetch_uchar_intrsafe(void *);
-u_short	ufetch_ushort_intrsafe(void *);
-u_int	ufetch_uint_intrsafe(void *);
-u_long	ufetch_ulong_intrsafe(void *);
-void 	*ufetch_ptr(void *);
-
-int	ustore_int8(void *, int8_t);
-int	ustore_int16(void *, int16_t);
-int	ustore_int32(void *, int32_t);
-int	ustore_uint8(void *, uint8_t);
-int	ustore_uint16(void *, uint16_t);
-int	ustore_uint32(void *, uint32_t);
-int	ustore_int8_intrsafe(void *, int8_t);
-int	ustore_int16_intrsafe(void *, int16_t);
-int	ustore_int32_intrsafe(void *, int32_t);
-int	ustore_uint8_intrsafe(void *, uint8_t);
-int	ustore_uint16_intrsafe(void *, uint16_t);
-int	ustore_uint32_intrsafe(void *, uint32_t);
-#ifdef _LP64
-int	ustore_int64(void *, int64_t);
-int	ustore_uint64(void *, uint64_t);
-int	ustore_int64_intrsafe(void *, int64_t);
-int	ustore_uint64_intrsafe(void *, uint64_t);
-#endif
-int	ustore_char(void *, char);
-int	ustore_char_intrsafe(void *, char);
-int	ustore_short(void *, short);
-int	ustore_short_intrsafe(void *, short);
-int	ustore_int(void *, int);
-int	ustore_int_intrsafe(void *, int);
-int	ustore_long(void *, long);
-int	ustore_long_intrsafe(void *, long);
-int	ustore_uchar(void *, u_char);
-int	ustore_uchar_intrsafe(void *, u_char);
-int	ustore_ushort(void *, u_short);
-int	ustore_ushort_intrsafe(void *, u_short);
-int	ustore_uint(void *, u_int);
-int	ustore_uint_intrsafe(void *, u_int);
-int	ustore_ulong(void *, u_long);
-int	ustore_ulong_intrsafe(void *, u_long);
-int 	ustore_ptr(void *, void *);
-int	ustore_ptr_intrsafe(void *, void *);
-
-int	ustore_uint32_isync(void *, uint32_t);
 
 /* trap.c */
 void	netintr(void);
-int	kdbpeek(vaddr_t);
+bool	kdbpeek(vaddr_t, int *);
 
 /* mips_dsp.c */
 void	dsp_init(void);
-void	dsp_discard(void);
+void	dsp_discard(lwp_t *);
 void	dsp_load(void);
-void	dsp_save(void);
-bool	dsp_used_p(void);
+void	dsp_save(lwp_t *);
+bool	dsp_used_p(const lwp_t *);
 extern const pcu_ops_t mips_dsp_ops;
 
 /* mips_fpu.c */
 void	fpu_init(void);
-void	fpu_discard(void);
+void	fpu_discard(lwp_t *);
 void	fpu_load(void);
-void	fpu_save(void);
-bool	fpu_used_p(void);
+void	fpu_save(lwp_t *);
+bool	fpu_used_p(const lwp_t *);
 extern const pcu_ops_t mips_fpu_ops;
 
 /* mips_machdep.c */
@@ -966,7 +906,7 @@ struct pridtab {
 # define MIPS_CIDFL_RMI_L2SZ(cidfl)					\
 		((256*1024) << (((cidfl) & MIPS_CIDFL_RMI_L2SZ_MASK)	\
 			>> MIPS_CIDFL_RMI_L2SZ_SHIFT))
-
+#endif /* !__ASSEMBLER__ */
 #endif	/* _KERNEL */
 
 #endif	/* _MIPS_LOCORE_H */

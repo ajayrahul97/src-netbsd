@@ -464,7 +464,7 @@ rump_softint_run(struct cpu_info *ci)
 
 	for (i = 0; i < SOFTINT_COUNT; i++) {
 		if (!TAILQ_EMPTY(&si_lvl[i].si_pending))
-			rumpuser_cv_signal(si_lvl[i].si_cv);
+			rump_schedlock_cv_signal(ci, si_lvl[i].si_cv);
 	}
 }
 

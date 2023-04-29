@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2019, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -73,7 +73,7 @@ AcpiTbFindTable (
     char                    *OemTableId,
     UINT32                  *TableIndex)
 {
-    ACPI_STATUS             Status;
+    ACPI_STATUS             Status = AE_OK;
     ACPI_TABLE_HEADER       Header;
     UINT32                  i;
 
@@ -99,16 +99,17 @@ AcpiTbFindTable (
     /* Normalize the input strings */
 
     memset (&Header, 0, sizeof (ACPI_TABLE_HEADER));
-    ACPI_MOVE_NAME (Header.Signature, Signature);
+    ACPI_COPY_NAMESEG (Header.Signature, Signature);
     strncpy (Header.OemId, OemId, ACPI_OEM_ID_SIZE);
     strncpy (Header.OemTableId, OemTableId, ACPI_OEM_TABLE_ID_SIZE);
 
     /* Search for the table */
 
+    (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
     for (i = 0; i < AcpiGbl_RootTableList.CurrentTableCount; ++i)
     {
         if (memcmp (&(AcpiGbl_RootTableList.Tables[i].Signature),
-            Header.Signature, ACPI_NAME_SIZE))
+            Header.Signature, ACPI_NAMESEG_SIZE))
         {
             /* Not the requested table */
 
@@ -124,7 +125,7 @@ AcpiTbFindTable (
             Status = AcpiTbValidateTable (&AcpiGbl_RootTableList.Tables[i]);
             if (ACPI_FAILURE (Status))
             {
-                return_ACPI_STATUS (Status);
+                goto UnlockAndExit;
             }
 
             if (!AcpiGbl_RootTableList.Tables[i].Pointer)
@@ -136,7 +137,7 @@ AcpiTbFindTable (
         /* Check for table match on all IDs */
 
         if (!memcmp (AcpiGbl_RootTableList.Tables[i].Pointer->Signature,
-                Header.Signature, ACPI_NAME_SIZE) &&
+                Header.Signature, ACPI_NAMESEG_SIZE) &&
             (!OemId[0] ||
              !memcmp (AcpiGbl_RootTableList.Tables[i].Pointer->OemId,
                  Header.OemId, ACPI_OEM_ID_SIZE)) &&
@@ -148,9 +149,12 @@ AcpiTbFindTable (
 
             ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "Found table [%4.4s]\n",
                 Header.Signature));
-            return_ACPI_STATUS (AE_OK);
+            goto UnlockAndExit;
         }
     }
+    Status = AE_NOT_FOUND;
 
-    return_ACPI_STATUS (AE_NOT_FOUND);
+UnlockAndExit:
+    (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
+    return_ACPI_STATUS (Status);
 }

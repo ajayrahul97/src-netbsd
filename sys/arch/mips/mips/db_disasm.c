@@ -1,4 +1,4 @@
-/*	$NetBSD: db_disasm.c,v 1.30 2015/06/27 03:31:29 matt Exp $	*/
+/*	$NetBSD: db_disasm.c,v 1.32 2019/04/06 03:06:26 thorpej Exp $	*/
 
 /*-
  * Copyright (c) 1991, 1993
@@ -35,7 +35,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: db_disasm.c,v 1.30 2015/06/27 03:31:29 matt Exp $");
+__KERNEL_RCSID(0, "$NetBSD: db_disasm.c,v 1.32 2019/04/06 03:06:26 thorpej Exp $");
 
 #include <sys/param.h>
 #include <sys/cpu.h>
@@ -226,14 +226,11 @@ db_disasm(db_addr_t loc, bool altfmt)
 	 * loses the current debugging context.  KSEG2 not checked.
 	 */
 	if (loc < MIPS_KSEG0_START) {
-		instr = ufetch_uint32((void *)loc);
-		if (instr == 0xffffffff) {
-			/* "sd ra, -1(ra)" is unlikely */
+		if (ufetch_32((void *)loc, &instr) != 0) {
 			db_printf("invalid address.\n");
 			return loc;
 		}
-	}
-	else {
+	} else {
 		instr =  *(uint32_t *)loc;
 	}
 
@@ -623,13 +620,13 @@ db_disasm_insn(int insn, db_addr_t loc, bool altfmt)
 			break;
 
 		case OP_CT:
-			db_printf("ctc1\t%s,f%d",
+			db_printf("ctc1\t%s,%d",
 			    reg_name[i.RType.rt],
 			    i.RType.rd);
 			break;
 
 		case OP_CF:
-			db_printf("cfc1\t%s,f%d",
+			db_printf("cfc1\t%s,%d",
 			    reg_name[i.RType.rt],
 			    i.RType.rd);
 			break;

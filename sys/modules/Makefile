@@ -1,16 +1,37 @@
-#	$NetBSD: Makefile,v 1.167 2016/06/09 04:44:18 pgoyette Exp $
+#	$NetBSD: Makefile,v 1.222.2.1 2019/09/01 13:00:37 martin Exp $
 
 .include <bsd.own.mk>
 
 # For all platforms
 
-SUBDIR=		accf_dataready
+# Modules for compatability with earlier versions of NetBSD
+
+SUBDIR+=	compat_util
+SUBDIR+=	compat_43   compat_sysctl_09_43
+SUBDIR+=	compat_09   compat_10   compat_12   compat_13   compat_14
+SUBDIR+=	compat_16   compat_20   compat_30   compat_40   compat_50
+SUBDIR+=	compat_60   compat_70   compat_80 
+
+SUBDIR+=	compat_sysv_10 compat_sysv_14 compat_sysv_50
+
+SUBDIR+=	compat_raid_50
+SUBDIR+=	compat_raid_80
+
+SUBDIR+=	compat_crypto_50
+
+SUBDIR+=	accf_dataready
 SUBDIR+=	accf_httpready
 SUBDIR+=	adosfs
 SUBDIR+=	aio
+SUBDIR+=	audio
+SUBDIR+=	autofs
 SUBDIR+=	blowfish
 SUBDIR+=	bpf
 SUBDIR+=	bpf_filter
+SUBDIR+=	bufq_disksort
+SUBDIR+=	bufq_fcfs
+SUBDIR+=	bufq_priocscan
+SUBDIR+=	bufq_readprio
 SUBDIR+=	camellia
 SUBDIR+=	cast128
 SUBDIR+=	ccd
@@ -18,11 +39,10 @@ SUBDIR+=	cd9660
 SUBDIR+=	cgd
 SUBDIR+=	chfs
 SUBDIR+=	clockctl
+SUBDIR+=	compat_ossaudio
 SUBDIR+=	crypto
 SUBDIR+=	coda
 SUBDIR+=	coda5
-SUBDIR+=	compat
-SUBDIR+=	compat_ossaudio
 SUBDIR+=	coredump
 SUBDIR+=	dbcool
 SUBDIR+=	des
@@ -41,15 +61,38 @@ SUBDIR+=	gpio
 SUBDIR+=	gpioiic
 SUBDIR+=	gpioow
 SUBDIR+=	gpiosim
+SUBDIR+=	gpioirq
+SUBDIR+=	gpiopps
 SUBDIR+=	hfs
 SUBDIR+=	hythygtemp
+SUBDIR+=	si70xxtemp
+SUBDIR+=	am2315temp
 SUBDIR+=	i2cexec
 SUBDIR+=	i2c_bitbang
+SUBDIR+=	if_agr
 SUBDIR+=	if_axe
 SUBDIR+=	if_axen
+SUBDIR+=	if_faith
+SUBDIR+=	if_gif
+SUBDIR+=	if_gre
+SUBDIR+=	if_l2tp
+SUBDIR+=	if_loop
+SUBDIR+=	if_mpls
+SUBDIR+=	if_mue
 SUBDIR+=	if_npflog
+SUBDIR+=	if_ppp
+SUBDIR+=	if_pppoe
+SUBDIR+=	if_sl
 SUBDIR+=	if_smsc
+SUBDIR+=	if_srt srt
+SUBDIR+=	if_stf
+SUBDIR+=	if_strip
+SUBDIR+=	if_tap tap
+SUBDIR+=	if_tun tun
+SUBDIR+=	if_ure
+SUBDIR+=	if_vlan
 SUBDIR+=	iic
+SUBDIR+=	ip_ecn
 SUBDIR+=	ipl
 SUBDIR+=	kernfs
 SUBDIR+=	layerfs
@@ -58,6 +101,7 @@ SUBDIR+=	lua
 SUBDIR+=	luasystm
 SUBDIR+=	luapmf
 SUBDIR+=	mfs
+SUBDIR+=	midi
 SUBDIR+=	miiverbose
 SUBDIR+=	miniroot
 SUBDIR+=	mqueue
@@ -82,6 +126,8 @@ SUBDIR+=	pf
 SUBDIR+=	ppp_bsdcomp
 SUBDIR+=	ppp_deflate
 SUBDIR+=	procfs
+SUBDIR+=	ptrace
+SUBDIR+=	ptrace_common
 SUBDIR+=	ptyfs
 SUBDIR+=	puffs
 SUBDIR+=	putter
@@ -92,9 +138,13 @@ SUBDIR+=	secmodel_bsd44
 SUBDIR+=	secmodel_extensions
 SUBDIR+=	secmodel_overlay
 SUBDIR+=	securelevel
+SUBDIR+=	sequencer
 SUBDIR+=	skipjack
+SUBDIR+=	slcompress
 SUBDIR+=	smbfs
 SUBDIR+=	spdmem
+SUBDIR+=	spkr
+SUBDIR+=	sppp_subr
 SUBDIR+=	sysmon
 SUBDIR+=	sysmon_envsys
 SUBDIR+=	sysmon_power
@@ -107,15 +157,19 @@ SUBDIR+=	swcrypto
 SUBDIR+=	swsensor
 SUBDIR+=	swwdog
 SUBDIR+=	tmpfs
+SUBDIR+=	ualea
 SUBDIR+=	uatp
 SUBDIR+=	udf
+SUBDIR+=	ufs
 SUBDIR+=	umap
 SUBDIR+=	union
+SUBDIR+=	usbnet
 SUBDIR+=	usbverbose
 SUBDIR+=	vcoda
 SUBDIR+=	v7fs
 SUBDIR+=	vnd
 SUBDIR+=	wapbl
+SUBDIR+=	wsbell
 SUBDIR+=	zlib
 SUBDIR+=	tprof
 .if (defined(NOTYET))
@@ -132,12 +186,15 @@ SUBDIR+=	xldscripts
 SUBDIR+=	exec_aout
 .endif
 
-.if ${MACHINE_ARCH} != "alpha" && ${MACHINE_CPU} != "aarch64"
+.if ${MACHINE_ARCH} != "alpha" && \
+    ${MACHINE_CPU} != "aarch64" && \
+    ${MACHINE_ARCH} != "ia64"
 SUBDIR+=	exec_elf32
 .endif
 
 .if ${MACHINE_CPU} == "aarch64" || \
     ${MACHINE_ARCH} == "alpha" || \
+    ${MACHINE_ARCH} == "ia64" || \
     ${MACHINE_ARCH} == "sparc64" || \
     ${MACHINE_ARCH} == "x86_64"
 SUBDIR+=	exec_elf64
@@ -145,7 +202,9 @@ SUBDIR+=	exec_elf64
 
 .if ${MACHINE_ARCH} == "i386" || \
     ${MACHINE_ARCH} == "x86_64"
+SUBDIR+=	amdsmn
 SUBDIR+=	amdtemp
+SUBDIR+=	amdzentemp
 SUBDIR+=	coretemp
 SUBDIR+=	est
 SUBDIR+=	hdafg
@@ -153,12 +212,16 @@ SUBDIR+=	hdaudio
 SUBDIR+=	hdaudio_pci
 SUBDIR+=	hdaudioverbose
 SUBDIR+=	hpet
+SUBDIR+=	ichsmb
 SUBDIR+=	odcm
 SUBDIR+=	powernow
 SUBDIR+=	tco
-SUBDIR+=	tprof_pmi
-SUBDIR+=	tprof_amdpmi
+SUBDIR+=	tprof_x86
 SUBDIR+=	vmt
+.endif
+
+.if ${MACHINE_ARCH} == "x86_64"
+SUBDIR+=	nvmm
 .endif
 
 .if ${MACHINE_ARCH} == "i386" || \
@@ -167,10 +230,11 @@ SUBDIR+=	ubsec		# Builds on architectures with PCI bus
 .endif
 
 .if ${MKSLJIT} != "no"
-# No modules for arm, mips and powerpc yet.
-.if ${MACHINE_ARCH} == "i386" || \
-    ${MACHINE_ARCH} == "x86_64" || \
-    ${MACHINE_ARCH} == "sparc"
+# No modules for 32-bit arm, mips and powerpc yet.
+.if ${MACHINE_ARCH} == "aarch64" || \
+    ${MACHINE_ARCH} == "i386"    || \
+    ${MACHINE_ARCH} == "sparc"   || \
+    ${MACHINE_ARCH} == "x86_64"
 SUBDIR+=	bpfjit
 SUBDIR+=	sljit
 .endif
@@ -212,27 +276,34 @@ SUBDIR+=	wmihp
 SUBDIR+=	wmimsi
 .endif
 
-.if ${MACHINE_CPU} == "arm" \
-    || (!empty(MACHINE_ARCH:Mmips64*) && !defined(BSD_MK_COMPAT_FILE))
+.include "${.CURDIR}/../compat/netbsd32/netbsd32.mk"
+.if ${COMPAT_USE_NETBSD32} != "no"
+
 SUBDIR+=	compat_netbsd32
-SUBDIR+=	compat_netbsd32_nfssrv
+SUBDIR+=	compat_netbsd32_09	compat_netbsd32_12
+SUBDIR+=	compat_netbsd32_13	compat_netbsd32_16
+SUBDIR+=	compat_netbsd32_20	compat_netbsd32_30
+SUBDIR+=	compat_netbsd32_40	compat_netbsd32_50
+SUBDIR+=	compat_netbsd32_60	compat_netbsd32_80
+SUBDIR+=	compat_netbsd32_43
 SUBDIR+=	compat_netbsd32_mqueue
+SUBDIR+=	compat_netbsd32_nfssrv
+SUBDIR+=	compat_netbsd32_ptrace
 SUBDIR+=	compat_netbsd32_sysvipc
-.endif
+SUBDIR+=	compat_netbsd32_sysvipc_10
+SUBDIR+=	compat_netbsd32_sysvipc_14
+SUBDIR+=	compat_netbsd32_sysvipc_50
+SUBDIR+=	compat_netbsd32_raid
 
 .if ${MACHINE_ARCH} == "x86_64"
 SUBDIR+=	compat_linux32
-SUBDIR+=	compat_netbsd32
-SUBDIR+=	compat_netbsd32_nfssrv
-SUBDIR+=	compat_netbsd32_mqueue
-SUBDIR+=	compat_netbsd32_sysvipc
+.endif
+
 .endif
 
 .if ${MACHINE_ARCH} == "i386"
 SUBDIR+=	ati_pcigart
 SUBDIR+=	compat_freebsd
-SUBDIR+=	compat_ibcs2
-SUBDIR+=	compat_svr4
 SUBDIR+=	mach64drm
 SUBDIR+=	mgadrm
 SUBDIR+=	nsclpcsio
@@ -243,7 +314,6 @@ SUBDIR+=	savagedrm
 SUBDIR+=	sisdrm
 SUBDIR+=	tdfxdrm
 SUBDIR+=	viac7temp
-SUBDIR+=	viadrm
 SUBDIR+=	viadrmums
 .endif
 
@@ -253,6 +323,7 @@ SUBDIR+=	azalia
 SUBDIR+=	compat_linux
 SUBDIR+=	drm
 SUBDIR+=	drmkms
+SUBDIR+=	drmkms_agp
 SUBDIR+=	drmkms_linux
 SUBDIR+=	drmkms_pci
 SUBDIR+=	i915drm
@@ -275,7 +346,6 @@ SUBDIR+=	wbsio
 SUBDIR+=	compat_aoutm68k
 #SUBDIR+=	compat_linux
 #SUBDIR+=	compat_sunos
-#SUBDIR+=	compat_svr4
 .endif
 
 .if ${MACHINE_ARCH} == "i386" || \
@@ -338,11 +408,52 @@ SUBDIR+=	auvitek
 SUBDIR+=	coram
 SUBDIR+=	cxdtv
 SUBDIR+=	emdtv
-SUBDIR+=	spkr
+
+# Intel Integrated Memory Controller and associated SMBus
+# (Experimental)
+SUBDIR+=	imc
+SUBDIR+=	imcsmb
+
 .endif
 
 .if (${MKISCSI} != "no")
 SUBDIR+=	iscsi
+.endif
+
+# For now, all of these are disabled, pending resolution of how to deal
+# with attachment-specific modules and bus-specific modules (as opposed
+# to machine- or architecture-specific modules)
+
+.if 0
+SUBDIR+=	aac
+SUBDIR+=	amr
+SUBDIR+=	ataraid
+SUBDIR+=	cac
+SUBDIR+=	cac_eisa
+SUBDIR+=	cac_pci
+SUBDIR+=	if_vioif
+SUBDIR+=	ld
+SUBDIR+=	ld_aac
+SUBDIR+=	ld_amr
+SUBDIR+=	ld_ataraid
+SUBDIR+=	ld_cac
+SUBDIR+=	ld_icp
+SUBDIR+=	ld_mlx
+SUBDIR+=	ld_sdmmc
+SUBDIR+=	ld_twa
+SUBDIR+=	ld_twe
+SUBDIR+=	ld_virtio
+SUBDIR+=	mlx
+SUBDIR+=	mlx_eisa
+SUBDIR+=	mlx_pci
+SUBDIR+=	ld_nvme
+SUBDIR+=	nvme
+SUBDIR+=	twa
+SUBDIR+=	twe
+SUBDIR+=	viomb
+SUBDIR+=	virtio
+SUBDIR+=	virtio_pci
+SUBDIR+=	vioscsi
 .endif
 
 SUBDIR+=	examples	# build these regularly to avoid bit-rot

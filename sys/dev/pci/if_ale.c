@@ -1,4 +1,4 @@
-/*	$NetBSD: if_ale.c,v 1.20 2016/02/09 08:32:11 ozaki-r Exp $	*/
+/*	$NetBSD: if_ale.c,v 1.33.2.3 2020/01/31 11:14:50 martin Exp $	*/
 
 /*-
  * Copyright (c) 2008, Pyun YongHyeon <yongari@FreeBSD.org>
@@ -32,7 +32,7 @@
 /* Driver for Atheros AR8121/AR8113/AR8114 PCIe Ethernet. */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_ale.c,v 1.20 2016/02/09 08:32:11 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_ale.c,v 1.33.2.3 2020/01/31 11:14:50 martin Exp $");
 
 #include "vlan.h"
 
@@ -82,8 +82,8 @@ static int	ale_match(device_t, cfdata_t, void *);
 static void	ale_attach(device_t, device_t, void *);
 static int	ale_detach(device_t, int);
 
-static int	ale_miibus_readreg(device_t, int, int);
-static void	ale_miibus_writereg(device_t, int, int, int);
+static int	ale_miibus_readreg(device_t, int, int, uint16_t *);
+static int	ale_miibus_writereg(device_t, int, int, uint16_t);
 static void	ale_miibus_statchg(struct ifnet *);
 
 static int	ale_init(struct ifnet *);
@@ -124,24 +124,24 @@ CFATTACH_DECL_NEW(ale, sizeof(struct ale_softc),
 int aledebug = 0;
 #define DPRINTF(x)	do { if (aledebug) printf x; } while (0)
 
-#define ETHER_ALIGN 2
 #define ALE_CSUM_FEATURES	(M_CSUM_TCPv4 | M_CSUM_UDPv4)
 
 static int
-ale_miibus_readreg(device_t dev, int phy, int reg)
+ale_miibus_readreg(device_t dev, int phy, int reg, uint16_t *val)
 {
 	struct ale_softc *sc = device_private(dev);
 	uint32_t v;
 	int i;
 
 	if (phy != sc->ale_phyaddr)
-		return 0;
+		return -1;
 
 	if (sc->ale_flags & ALE_FLAG_FASTETHER) {
 		switch (reg) {
 		case MII_100T2CR:
 		case MII_100T2SR:
 		case MII_EXTSR:
+			*val = 0;
 			return 0;
 		default:
 			break;
@@ -160,28 +160,29 @@ ale_miibus_readreg(device_t dev, int phy, int reg)
 	if (i == 0) {
 		printf("%s: phy read timeout: phy %d, reg %d\n",
 		    device_xname(sc->sc_dev), phy, reg);
-		return 0;
+		return ETIMEDOUT;
 	}
 
-	return (v & MDIO_DATA_MASK) >> MDIO_DATA_SHIFT;
+	*val = (v & MDIO_DATA_MASK) >> MDIO_DATA_SHIFT;
+	return 0;
 }
 
-static void
-ale_miibus_writereg(device_t dev, int phy, int reg, int val)
+static int
+ale_miibus_writereg(device_t dev, int phy, int reg, uint16_t val)
 {
 	struct ale_softc *sc = device_private(dev);
 	uint32_t v;
 	int i;
 
 	if (phy != sc->ale_phyaddr)
-		return;
+		return -1;
 
 	if (sc->ale_flags & ALE_FLAG_FASTETHER) {
 		switch (reg) {
 		case MII_100T2CR:
 		case MII_100T2SR:
 		case MII_EXTSR:
-			return;
+			return 0;
 		default:
 			break;
 		}
@@ -197,9 +198,13 @@ ale_miibus_writereg(device_t dev, int phy, int reg, int val)
 			break;
 	}
 
-	if (i == 0)
+	if (i == 0) {
 		printf("%s: phy write timeout: phy %d, reg %d\n",
 		    device_xname(sc->sc_dev), phy, reg);
+		return ETIMEDOUT;
+	}
+
+	return 0;
 }
 
 static void
@@ -383,6 +388,7 @@ ale_attach(device_t parent, device_t self, void *aux)
 	pci_intr_handle_t ih;
 	const char *intrstr;
 	struct ifnet *ifp;
+	struct mii_data * const mii = &sc->sc_miibus;
 	pcireg_t memtype;
 	int mii_flags, error = 0;
 	uint32_t rxf_len, txf_len;
@@ -426,7 +432,8 @@ ale_attach(device_t parent, device_t self, void *aux)
 	 * Allocate IRQ
 	 */
 	intrstr = pci_intr_string(sc->sc_pct, ih, intrbuf, sizeof(intrbuf));
-	sc->sc_irq_handle = pci_intr_establish(pc, ih, IPL_NET, ale_intr, sc);
+	sc->sc_irq_handle = pci_intr_establish_xname(pc, ih, IPL_NET, ale_intr,
+	    sc, device_xname(self));
 	if (sc->sc_irq_handle == NULL) {
 		aprint_error_dev(self, "could not establish interrupt");
 		if (intrstr != NULL)
@@ -546,32 +553,32 @@ ale_attach(device_t parent, device_t self, void *aux)
 
 #if NVLAN > 0
 	sc->sc_ec.ec_capabilities |= ETHERCAP_VLAN_HWTAGGING;
+	sc->sc_ec.ec_capenable |= ETHERCAP_VLAN_HWTAGGING;
 #endif
 
 	/* Set up MII bus. */
-	sc->sc_miibus.mii_ifp = ifp;
-	sc->sc_miibus.mii_readreg = ale_miibus_readreg;
-	sc->sc_miibus.mii_writereg = ale_miibus_writereg;
-	sc->sc_miibus.mii_statchg = ale_miibus_statchg;
+	mii->mii_ifp = ifp;
+	mii->mii_readreg = ale_miibus_readreg;
+	mii->mii_writereg = ale_miibus_writereg;
+	mii->mii_statchg = ale_miibus_statchg;
 
-	sc->sc_ec.ec_mii = &sc->sc_miibus;
-	ifmedia_init(&sc->sc_miibus.mii_media, 0, ale_mediachange,
-	    ale_mediastatus);
+	sc->sc_ec.ec_mii = mii;
+	ifmedia_init(&mii->mii_media, 0, ale_mediachange, ale_mediastatus);
 	mii_flags = 0;
 	if ((sc->ale_flags & ALE_FLAG_JUMBO) != 0)
 		mii_flags |= MIIF_DOPAUSE;
-	mii_attach(self, &sc->sc_miibus, 0xffffffff, MII_PHY_ANY,
+	mii_attach(self, mii, 0xffffffff, MII_PHY_ANY,
 	    MII_OFFSET_ANY, mii_flags);
 
-	if (LIST_FIRST(&sc->sc_miibus.mii_phys) == NULL) {
+	if (LIST_FIRST(&mii->mii_phys) == NULL) {
 		aprint_error_dev(self, "no PHY found!\n");
-		ifmedia_add(&sc->sc_miibus.mii_media, IFM_ETHER | IFM_MANUAL,
-		    0, NULL);
-		ifmedia_set(&sc->sc_miibus.mii_media, IFM_ETHER | IFM_MANUAL);
+		ifmedia_add(&mii->mii_media, IFM_ETHER | IFM_MANUAL, 0, NULL);
+		ifmedia_set(&mii->mii_media, IFM_ETHER | IFM_MANUAL);
 	} else
-		ifmedia_set(&sc->sc_miibus.mii_media, IFM_ETHER | IFM_AUTO);
+		ifmedia_set(&mii->mii_media, IFM_ETHER | IFM_AUTO);
 
 	if_attach(ifp);
+	if_deferred_start_init(ifp, NULL);
 	ether_ifattach(ifp, sc->ale_eaddr);
 
 	if (pmf_device_register(self, NULL, NULL))
@@ -909,9 +916,6 @@ ale_encap(struct ale_softc *sc, struct mbuf **m_head)
 	bus_dmamap_t map;
 	uint32_t cflags, poff, vtag;
 	int error, i, nsegs, prod;
-#if NVLAN > 0
-	struct m_tag *mtag;
-#endif
 
 	m = *m_head;
 	cflags = vtag = 0;
@@ -996,8 +1000,8 @@ ale_encap(struct ale_softc *sc, struct mbuf **m_head)
 
 #if NVLAN > 0
 	/* Configure VLAN hardware tag insertion. */
-	if ((mtag = VLAN_OUTPUT_TAG(&sc->sc_ec, m))) {
-		vtag = ALE_TX_VLAN_TAG(htons(VLAN_TAG_VALUE(mtag)));
+	if (vlan_has_tag(m)) {
+		vtag = ALE_TX_VLAN_TAG(htons(vlan_get_tag(m)));
 		vtag = ((vtag << ALE_TD_VLAN_SHIFT) & ALE_TD_VLAN_MASK);
 		cflags |= ALE_TD_INSERT_VLAN_TAG;
 	}
@@ -1038,7 +1042,7 @@ ale_encap(struct ale_softc *sc, struct mbuf **m_head)
 static void
 ale_start(struct ifnet *ifp)
 {
-        struct ale_softc *sc = ifp->if_softc;
+	struct ale_softc *sc = ifp->if_softc;
 	struct mbuf *m_head;
 	int enq;
 
@@ -1073,7 +1077,7 @@ ale_start(struct ifnet *ifp)
 		 * If there's a BPF listener, bounce a copy of this frame
 		 * to him.
 		 */
-		bpf_mtap(ifp, m_head);
+		bpf_mtap(ifp, m_head, BPF_D_OUT);
 	}
 
 	if (enq) {
@@ -1269,8 +1273,6 @@ ale_stats_update(struct ale_softc *sc)
 	ifp->if_oerrors += smb->tx_abort + smb->tx_late_colls +
 	    smb->tx_underrun;
 
-	ifp->if_ipackets += smb->rx_frames;
-
 	ifp->if_ierrors += smb->rx_crcerrs + smb->rx_lenerrs +
 	    smb->rx_runts + smb->rx_pkts_truncated +
 	    smb->rx_fifo_oflows + smb->rx_rrs_errs +
@@ -1313,8 +1315,7 @@ ale_intr(void *xsc)
 		}
 
 		ale_txeof(sc);
-		if (!IFQ_IS_EMPTY(&ifp->if_snd))
-			ale_start(ifp);
+		if_schedule_deferred_start(ifp);
 	}
 
 	/* Re-enable interrupts. */
@@ -1529,7 +1530,7 @@ ale_rxeof(struct ale_softc *sc)
 		 * on these low-end consumer ethernet controller.
 		 */
 		m = m_devget((char *)(rs + 1), length - ETHER_CRC_LEN,
-		    0, ifp, NULL);
+		    0, ifp);
 		if (m == NULL) {
 			ifp->if_iqdrops++;
 			ale_rx_update_page(sc, &rx_page, length, &prod);
@@ -1540,12 +1541,9 @@ ale_rxeof(struct ale_softc *sc)
 #if NVLAN > 0
 		if (status & ALE_RD_VLAN) {
 			uint32_t vtags = ALE_RX_VLAN(le32toh(rs->vtags));
-			VLAN_INPUT_TAG(ifp, m, ALE_RX_VLAN_TAG(vtags), );
+			vlan_set_tag(m, ALE_RX_VLAN_TAG(vtags));
 		}
 #endif
-
-
-		bpf_mtap(ifp, m);
 
 		/* Pass it to upper layer. */
 		if_percpuq_enqueue(ifp->if_percpuq, m);
@@ -1895,7 +1893,7 @@ ale_stop(struct ifnet *ifp, int disable)
 			m_freem(txd->tx_m);
 			txd->tx_m = NULL;
 		}
-        }
+	}
 }
 
 static void
@@ -1998,25 +1996,37 @@ ale_rxfilter(struct ale_softc *sc)
 	 */
 	rxcfg |= MAC_CFG_BCAST;
 
-	if (ifp->if_flags & IFF_PROMISC || ec->ec_multicnt > 0) {
-		ifp->if_flags |= IFF_ALLMULTI;
-		if (ifp->if_flags & IFF_PROMISC)
+	/* Program new filter. */
+	if ((ifp->if_flags & IFF_PROMISC) != 0)
+		goto update;
+
+	memset(mchash, 0, sizeof(mchash));
+
+	ETHER_LOCK(ec);
+	ETHER_FIRST_MULTI(step, ec, enm);
+	while (enm != NULL) {
+		if (memcmp(enm->enm_addrlo, enm->enm_addrhi, ETHER_ADDR_LEN)) {
+			/* XXX Use ETHER_F_ALLMULTI in future. */
+			ifp->if_flags |= IFF_ALLMULTI;
+			ETHER_UNLOCK(ec);
+			goto update;
+		}
+		crc = ether_crc32_be(enm->enm_addrlo, ETHER_ADDR_LEN);
+		mchash[crc >> 31] |= 1U << ((crc >> 26) & 0x1f);
+		ETHER_NEXT_MULTI(step, enm);
+	}
+	ETHER_UNLOCK(ec);
+
+update:
+	if ((ifp->if_flags & (IFF_PROMISC | IFF_ALLMULTI)) != 0) {
+		if (ifp->if_flags & IFF_PROMISC) {
 			rxcfg |= MAC_CFG_PROMISC;
-		else
+			/* XXX Use ETHER_F_ALLMULTI in future. */
+			ifp->if_flags |= IFF_ALLMULTI;
+		} else
 			rxcfg |= MAC_CFG_ALLMULTI;
 		mchash[0] = mchash[1] = 0xFFFFFFFF;
-	} else {
-		/* Program new filter. */
-		memset(mchash, 0, sizeof(mchash));
-
-		ETHER_FIRST_MULTI(step, ec, enm);
-		while (enm != NULL) {
-			crc = ether_crc32_be(enm->enm_addrlo, ETHER_ADDR_LEN);
-			mchash[crc >> 31] |= 1 << ((crc >> 26) & 0x1f);
-			ETHER_NEXT_MULTI(step, enm);
-		}
 	}
-
 	CSR_WRITE_4(sc, ALE_MAR0, mchash[0]);
 	CSR_WRITE_4(sc, ALE_MAR1, mchash[1]);
 	CSR_WRITE_4(sc, ALE_MAC_CFG, rxcfg);

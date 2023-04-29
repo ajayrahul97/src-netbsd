@@ -1,4 +1,4 @@
-/*	$NetBSD: cpufunc.S,v 1.21 2014/09/16 09:42:47 mrg Exp $	*/
+/*	$NetBSD: cpufunc.S,v 1.34 2019/07/05 17:08:55 maxv Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2007 The NetBSD Foundation, Inc.
@@ -38,7 +38,7 @@
 #include <sys/errno.h>
 
 #include <machine/asm.h>
-__KERNEL_RCSID(0, "$NetBSD: cpufunc.S,v 1.21 2014/09/16 09:42:47 mrg Exp $");
+__KERNEL_RCSID(0, "$NetBSD: cpufunc.S,v 1.34 2019/07/05 17:08:55 maxv Exp $");
 
 #include "opt_xen.h"
 
@@ -65,27 +65,13 @@ ENTRY(x86_mfence)
 	ret
 END(x86_mfence)
 
+#ifndef XENPV
 ENTRY(lidt)
 	movl	4(%esp), %eax
 	lidt	(%eax)
 	ret
 END(lidt)
-
-ENTRY(rcr3)
-	movl	%cr3, %eax
-	ret
-END(rcr3)
-
-ENTRY(lcr4)
-	movl	4(%esp), %eax
-	movl	%eax, %cr4
-	ret
-END(lcr4)
-
-ENTRY(rcr4)
-	movl	%cr4, %eax
-	ret
-END(rcr4)
+#endif /* XENPV */
 
 ENTRY(x86_read_flags)
 	pushfl
@@ -100,24 +86,10 @@ ENTRY(x86_write_flags)
 	ret
 END(x86_write_flags)
 
-#ifndef XEN
+#ifndef XENPV
 STRONG_ALIAS(x86_write_psl,x86_write_flags)
 STRONG_ALIAS(x86_read_psl,x86_read_flags)
-#endif	/* XEN */
-
-ENTRY(rdmsr)
-	movl	4(%esp), %ecx
-	rdmsr
-	ret
-END(rdmsr)
-
-ENTRY(wrmsr)
-	movl	4(%esp), %ecx
-	movl	8(%esp), %eax
-	movl	12(%esp), %edx
-	wrmsr
-	ret
-END(wrmsr)
+#endif	/* XENPV */
 
 ENTRY(rdmsr_locked)
 	movl	4(%esp), %ecx
@@ -162,27 +134,10 @@ ENTRY(rdmsr_safe)
 	ret
 END(rdmsr_safe)
 
-/* uint64_t rdxcr(uint32_t) */
-ENTRY(rdxcr)
-	movl	4(%esp), %ecx	/* extended control reg number */
-	xgetbv			/* Read to %edx:%eax */
-	ret
-END(rdxcr)
-
-/* void wrxcr(uint32_t, uint64_t) */
-ENTRY(wrxcr)
-	movl	4(%esp), %ecx	/* extended control reg number */
-	movl	8(%esp), %eax	/* feature mask bits */
-	movl	12(%esp), %edx
-	xsetbv
-	ret
-END(wrxcr)
-	
-
 /*
  * MSR operations fault handler
  */
-NENTRY(msr_onfault)
+ENTRY(msr_onfault)
 	movl	CPUVAR(CURLWP), %ecx
 	movl	L_PCB(%ecx), %ecx
 	movl	$0, PCB_ONFAULT(%ecx)
@@ -202,12 +157,6 @@ ENTRY(cpu_counter32)
 	addl	CPUVAR(CC_SKEW), %eax
 	ret
 END(cpu_counter32)
-
-ENTRY(rdpmc)
-	movl	4(%esp), %ecx
-	rdpmc
-	ret
-END(rdpmc)
 
 ENTRY(breakpoint)
 	pushl	%ebp
@@ -295,94 +244,17 @@ ENTRY(x86_mwait)
 	ret
 END(x86_mwait)  
 
-ENTRY(x86_pause)
-	pause
-	ret
-END(x86_pause)
-
-ENTRY(x86_cpuid2)
-	pushl	%ebx
-	pushl	%edi
-	movl	12(%esp), %eax
-	movl	16(%esp), %ecx
-	movl	20(%esp), %edi
-	cpuid
-	movl	%eax, 0(%edi)
-	movl	%ebx, 4(%edi)
-	movl	%ecx, 8(%edi)
-	movl	%edx, 12(%edi)
-	popl	%edi
-	popl	%ebx
-	ret
-END(x86_cpuid2)
-
-ENTRY(x86_getss)
-	movl	%ss, %eax
-	ret
-END(x86_getss)
-
-ENTRY(fldcw)
-	movl	4(%esp), %eax
-	fldcw	(%eax)
-	ret
-END(fldcw)
-
-ENTRY(fnclex)	
-	fnclex
-	ret
-END(fnclex)	
-
-ENTRY(fninit)
-	fninit
-	ret
-END(fninit)
-
 ENTRY(fnsave)
 	movl	4(%esp), %eax
 	fnsave	(%eax)
 	ret
 END(fnsave)
 
-ENTRY(fnstcw)
-	movl	4(%esp), %eax
-	fnstcw	(%eax)
-	ret
-END(fnstcw)
-
-ENTRY(fngetsw)
-	fnstsw	%ax
-	ret
-END(fngetsw)
-
-ENTRY(fnstsw)
-	movl	4(%esp), %eax
-	fnstsw	(%eax)
-	ret
-END(fnstsw)
-
-ENTRY(fp_divide_by_0)
-	fldz
-	fld1
-	fdiv	%st, %st(1)
-	fwait
-	ret
-END(fp_divide_by_0)
-
 ENTRY(frstor)
 	movl	4(%esp), %eax
 	frstor	(%eax)
 	ret
 END(frstor)
-
-ENTRY(fwait)
-	fwait
-	ret
-END(fwait)
-
-ENTRY(clts)
-	clts
-	ret
-END(clts)
 
 ENTRY(stts)
 	movl	%cr0, %eax
@@ -429,18 +301,6 @@ ENTRY(xrstor)
 	xrstor	(%ecx)
 	ret
 END(xrstor)
-
-ENTRY(x86_stmxcsr)
-	movl	4(%esp), %eax
-	stmxcsr	(%eax)
-	ret
-END(x86_stmxcsr)
-
-ENTRY(x86_ldmxcsr)
-	movl	4(%esp), %eax
-	ldmxcsr	(%eax)
-	ret
-END(x86_ldmxcsr)
 
 ENTRY(fldummy)
 	ffree	%st(7)

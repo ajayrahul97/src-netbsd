@@ -1,4 +1,4 @@
-/*	$NetBSD: uaudio.c,v 1.147 2016/07/07 06:55:42 msaitoh Exp $	*/
+/*	$NetBSD: uaudio.c,v 1.161.2.1 2019/11/19 12:56:48 martin Exp $	*/
 
 /*
  * Copyright (c) 1999, 2012 The NetBSD Foundation, Inc.
@@ -37,7 +37,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: uaudio.c,v 1.147 2016/07/07 06:55:42 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: uaudio.c,v 1.161.2.1 2019/11/19 12:56:48 martin Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_usb.h"
@@ -61,10 +61,7 @@ __KERNEL_RCSID(0, "$NetBSD: uaudio.c,v 1.147 2016/07/07 06:55:42 msaitoh Exp $")
 #include <sys/atomic.h>
 
 #include <sys/audioio.h>
-#include <dev/audio_if.h>
-#include <dev/audiovar.h>
-#include <dev/mulaw.h>
-#include <dev/auconv.h>
+#include <dev/audio/audio_if.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -207,7 +204,6 @@ struct uaudio_softc {
 	device_t	sc_audiodev;
 	struct audio_format *sc_formats;
 	int		sc_nformats;
-	struct audio_encoding_set *sc_encodings;
 	u_int		sc_channel_config;
 	char		sc_dying;
 	struct audio_device sc_adev;
@@ -334,12 +330,10 @@ Static void	uaudio_chan_rintr
 	(struct usbd_xfer *, void *, usbd_status);
 
 Static int	uaudio_open(void *, int);
-Static void	uaudio_close(void *);
-Static int	uaudio_drain(void *);
-Static int	uaudio_query_encoding(void *, struct audio_encoding *);
-Static int	uaudio_set_params
-	(void *, int, int, struct audio_params *, struct audio_params *,
-	 stream_filter_list_t *, stream_filter_list_t *);
+Static int	uaudio_query_format(void *, audio_format_query_t *);
+Static int	uaudio_set_format
+     (void *, int, const audio_params_t *, const audio_params_t *,
+	 audio_filter_reg_t *, audio_filter_reg_t *);
 Static int	uaudio_round_blocksize(void *, int, int, const audio_params_t *);
 Static int	uaudio_trigger_output
 	(void *, void *, void *, int, void (*)(void *), void *,
@@ -357,34 +351,20 @@ Static int	uaudio_get_props(void *);
 Static void	uaudio_get_locks(void *, kmutex_t **, kmutex_t **);
 
 Static const struct audio_hw_if uaudio_hw_if = {
-	uaudio_open,
-	uaudio_close,
-	uaudio_drain,
-	uaudio_query_encoding,
-	uaudio_set_params,
-	uaudio_round_blocksize,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	uaudio_halt_out_dma,
-	uaudio_halt_in_dma,
-	NULL,
-	uaudio_getdev,
-	NULL,
-	uaudio_mixer_set_port,
-	uaudio_mixer_get_port,
-	uaudio_query_devinfo,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	uaudio_get_props,
-	uaudio_trigger_output,
-	uaudio_trigger_input,
-	NULL,
-	uaudio_get_locks,
+	.open			= uaudio_open,
+	.query_format		= uaudio_query_format,
+	.set_format		= uaudio_set_format,
+	.round_blocksize	= uaudio_round_blocksize,
+	.halt_output		= uaudio_halt_out_dma,
+	.halt_input		= uaudio_halt_in_dma,
+	.getdev			= uaudio_getdev,
+	.set_port		= uaudio_mixer_set_port,
+	.get_port		= uaudio_mixer_get_port,
+	.query_devinfo		= uaudio_query_devinfo,
+	.get_props		= uaudio_get_props,
+	.trigger_output		= uaudio_trigger_output,
+	.trigger_input		= uaudio_trigger_input,
+	.get_locks		= uaudio_get_locks,
 };
 
 int uaudio_match(device_t, cfdata_t, void *);
@@ -393,7 +373,7 @@ int uaudio_detach(device_t, int);
 void uaudio_childdet(device_t, device_t);
 int uaudio_activate(device_t, enum devact);
 
-extern struct cfdriver uaudio_cd;
+
 
 CFATTACH_DECL2_NEW(uaudio, sizeof(struct uaudio_softc),
     uaudio_match, uaudio_attach, uaudio_detach, uaudio_activate, NULL,
@@ -504,6 +484,9 @@ uaudio_attach(device_t parent, device_t self, void *aux)
 	DPRINTF("%s", "doing audio_attach_mi\n");
 	sc->sc_audiodev = audio_attach_mi(&uaudio_hw_if, sc, sc->sc_dev);
 
+	if (!pmf_device_register(self, NULL, NULL))
+		aprint_error_dev(self, "couldn't establish power handler\n");
+
 	return;
 }
 
@@ -534,9 +517,10 @@ int
 uaudio_detach(device_t self, int flags)
 {
 	struct uaudio_softc *sc = device_private(self);
-	int rv;
+	int rv = 0;
 
-	rv = 0;
+	pmf_device_deregister(self);
+
 	/* Wait for outstanding requests to complete. */
 	usbd_delay_ms(sc->sc_udev, UAUDIO_NCHANBUFS * UAUDIO_NFRAMES);
 
@@ -548,7 +532,6 @@ uaudio_detach(device_t self, int flags)
 	if (sc->sc_formats != NULL)
 		kmem_free(sc->sc_formats,
 		    sizeof(struct audio_format) * sc->sc_nformats);
-	auconv_delete_encodings(sc->sc_encodings);
 
 	mutex_destroy(&sc->sc_lock);
 	mutex_destroy(&sc->sc_intr_lock);
@@ -557,20 +540,12 @@ uaudio_detach(device_t self, int flags)
 }
 
 Static int
-uaudio_query_encoding(void *addr, struct audio_encoding *fp)
+uaudio_query_format(void *addr, audio_format_query_t *afp)
 {
 	struct uaudio_softc *sc;
-	int flags;
 
 	sc = addr;
-	flags = sc->sc_altflags;
-	if (sc->sc_dying)
-		return EIO;
-
-	if (sc->sc_nalts == 0 || flags == 0)
-		return ENXIO;
-
-	return auconv_query_encoding(sc->sc_encodings, fp);
+	return audio_query_format(sc->sc_formats, sc->sc_nformats, afp);
 }
 
 Static const usb_interface_descriptor_t *
@@ -603,10 +578,6 @@ uaudio_mixer_add_ctl(struct uaudio_softc *sc, struct mixerctl *mc)
 	}
 	len = sizeof(*mc) * (sc->sc_nctls + 1);
 	nmc = kmem_alloc(len, KM_SLEEP);
-	if (nmc == NULL) {
-		aprint_error("uaudio_mixer_add_ctl: no memory\n");
-		return;
-	}
 	/* Copy old data, if there was any */
 	if (sc->sc_nctls != 0) {
 		memcpy(nmc, sc->sc_ctls, sizeof(*mc) * (sc->sc_nctls));
@@ -1540,10 +1511,6 @@ uaudio_add_alt(struct uaudio_softc *sc, const struct as_info *ai)
 
 	len = sizeof(*ai) * (sc->sc_nalts + 1);
 	nai = kmem_alloc(len, KM_SLEEP);
-	if (nai == NULL) {
-		aprint_error("uaudio_add_alt: no memory\n");
-		return;
-	}
 	/* Copy old data, if there was any */
 	if (sc->sc_nalts != 0) {
 		memcpy(nai, sc->sc_alts, sizeof(*ai) * (sc->sc_nalts));
@@ -1589,7 +1556,7 @@ uaudio_process_as(struct uaudio_softc *sc, const char *tbuf, int *offsp,
 		return USBD_INVAL;
 
 	if (asf1d->bFormatType != FORMAT_TYPE_I) {
-		aprint_error_dev(sc->sc_dev,
+		aprint_normal_dev(sc->sc_dev,
 		    "ignored setting with type %d format\n", UGETW(asid->wFormatTag));
 		return USBD_NORMAL_COMPLETION;
 	}
@@ -1620,7 +1587,7 @@ uaudio_process_as(struct uaudio_softc *sc, const char *tbuf, int *offsp,
 	if (dir == UE_DIR_IN && type == UE_ISO_ADAPT) {
 		sync = TRUE;
 #ifndef UAUDIO_MULTIPLE_ENDPOINTS
-		aprint_error_dev(sc->sc_dev,
+		aprint_normal_dev(sc->sc_dev,
 		    "ignored input endpoint of type adaptive\n");
 		return USBD_NORMAL_COMPLETION;
 #endif
@@ -1628,7 +1595,7 @@ uaudio_process_as(struct uaudio_softc *sc, const char *tbuf, int *offsp,
 	if (dir != UE_DIR_IN && type == UE_ISO_ASYNC) {
 		sync = TRUE;
 #ifndef UAUDIO_MULTIPLE_ENDPOINTS
-		aprint_error_dev(sc->sc_dev,
+		aprint_normal_dev(sc->sc_dev,
 		    "ignored output endpoint of type async\n");
 		return USBD_NORMAL_COMPLETION;
 #endif
@@ -1697,7 +1664,7 @@ uaudio_process_as(struct uaudio_softc *sc, const char *tbuf, int *offsp,
 	chan = asf1d->bNrChannels;
 	prec = asf1d->bBitResolution;
 	if (prec != 8 && prec != 16 && prec != 24) {
-		aprint_error_dev(sc->sc_dev,
+		aprint_normal_dev(sc->sc_dev,
 		    "ignored setting with precision %d\n", prec);
 		return USBD_NORMAL_COMPLETION;
 	}
@@ -1730,7 +1697,7 @@ uaudio_process_as(struct uaudio_softc *sc, const char *tbuf, int *offsp,
 		break;
 	case UA_FMT_IEEE_FLOAT:
 	default:
-		aprint_error_dev(sc->sc_dev,
+		aprint_normal_dev(sc->sc_dev,
 		    "ignored setting with format %d\n", format);
 		return USBD_NORMAL_COMPLETION;
 	}
@@ -1828,15 +1795,12 @@ uaudio_identify_as(struct uaudio_softc *sc,
 	}
 
 	/* build audio_format array */
-	sc->sc_formats = kmem_alloc(sizeof(struct audio_format) * sc->sc_nalts,
+	sc->sc_formats = kmem_zalloc(sizeof(struct audio_format) * sc->sc_nalts,
 	    KM_SLEEP);
-	if (sc->sc_formats == NULL)
-		return USBD_NOMEM;
 	sc->sc_nformats = sc->sc_nalts;
 	for (i = 0; i < sc->sc_nalts; i++) {
 		auf = &sc->sc_formats[i];
 		t1desc = sc->sc_alts[i].asf1desc;
-		auf->driver_data = NULL;
 		if (UE_GET_DIR(sc->sc_alts[i].edesc->bEndpointAddress) == UE_DIR_OUT)
 			auf->mode = AUMODE_PLAY;
 		else
@@ -1864,14 +1828,6 @@ uaudio_identify_as(struct uaudio_softc *sc,
 			}
 		}
 		sc->sc_alts[i].aformat = auf;
-	}
-
-	if (0 != auconv_create_encodings(sc->sc_formats, sc->sc_nformats,
-					 &sc->sc_encodings)) {
-		kmem_free(sc->sc_formats,
-		    sizeof(struct audio_format) * sc->sc_nformats);
-		sc->sc_formats = NULL;
-		return ENOMEM;
 	}
 
 	return USBD_NORMAL_COMPLETION;
@@ -2203,27 +2159,6 @@ uaudio_open(void *addr, int flags)
 	return 0;
 }
 
-/*
- * Close function is called at splaudio().
- */
-Static void
-uaudio_close(void *addr)
-{
-}
-
-Static int
-uaudio_drain(void *addr)
-{
-	struct uaudio_softc *sc = addr;
-
-	KASSERT(mutex_owned(&sc->sc_intr_lock));
-
-	kpause("uaudiodr", false,
-	    mstohz(UAUDIO_NCHANBUFS * UAUDIO_NFRAMES), &sc->sc_intr_lock);
-
-	return 0;
-}
-
 Static int
 uaudio_halt_out_dma(void *addr)
 {
@@ -2304,7 +2239,7 @@ uaudio_round_blocksize(void *addr, int blk,
 	} else {
 		/*
 		 * use wMaxPacketSize in bytes_per_frame.
-		 * See uaudio_set_params() and uaudio_chan_init()
+		 * See uaudio_set_format() and uaudio_chan_init()
 		 */
 		b = sc->sc_recchan.bytes_per_frame
 		    * UAUDIO_NFRAMES * UAUDIO_NCHANBUFS;
@@ -2328,8 +2263,21 @@ uaudio_round_blocksize(void *addr, int blk,
 Static int
 uaudio_get_props(void *addr)
 {
-	return AUDIO_PROP_FULLDUPLEX | AUDIO_PROP_INDEPENDENT;
+	struct uaudio_softc *sc;
+	int props;
 
+	sc = addr;
+	props = 0;
+	if ((sc->sc_mode & AUMODE_PLAY))
+		props |= AUDIO_PROP_PLAYBACK;
+	if ((sc->sc_mode & AUMODE_RECORD))
+		props |= AUDIO_PROP_CAPTURE;
+
+	/* XXX I'm not sure all bidirectional devices support FULLDUP&INDEP */
+	if (props == (AUDIO_PROP_PLAYBACK | AUDIO_PROP_CAPTURE))
+		props |= AUDIO_PROP_FULLDUPLEX | AUDIO_PROP_INDEPENDENT;
+
+	return props;
 }
 
 Static void
@@ -2599,17 +2547,14 @@ uaudio_trigger_input(void *addr, void *start, void *end, int blksize,
 		    "fraction=0.%03d\n", ch->sample_size, ch->bytes_per_frame,
 		    ch->fraction);
 
-	mutex_exit(&sc->sc_intr_lock);
 	err = uaudio_chan_open(sc, ch);
 	if (err) {
-		mutex_enter(&sc->sc_intr_lock);
 		return EIO;
 	}
 
 	err = uaudio_chan_alloc_buffers(sc, ch);
 	if (err) {
 		uaudio_chan_close(sc, ch);
-		mutex_enter(&sc->sc_intr_lock);
 		return EIO;
 	}
 
@@ -2617,12 +2562,13 @@ uaudio_trigger_input(void *addr, void *start, void *end, int blksize,
 	ch->intr = intr;
 	ch->arg = arg;
 
-	 /* XXX -1 shouldn't be needed */
-	for (i = 0; i < UAUDIO_NCHANBUFS - 1; i++) {
+	/*
+	 * Start as half as many channels for recording as for playback.
+	 * This stops playback from stuttering in full-duplex operation.
+	 */
+	for (i = 0; i < UAUDIO_NCHANBUFS / 2; i++) {
 		uaudio_chan_rtransfer(ch);
 	}
-
-	mutex_enter(&sc->sc_intr_lock);
 
 	return 0;
 }
@@ -2649,27 +2595,22 @@ uaudio_trigger_output(void *addr, void *start, void *end, int blksize,
 		    "fraction=0.%03d\n", ch->sample_size, ch->bytes_per_frame,
 		    ch->fraction);
 
-	mutex_exit(&sc->sc_intr_lock);
 	err = uaudio_chan_open(sc, ch);
 	if (err) {
-		mutex_enter(&sc->sc_intr_lock);
 		return EIO;
 	}
 
 	err = uaudio_chan_alloc_buffers(sc, ch);
 	if (err) {
 		uaudio_chan_close(sc, ch);
-		mutex_enter(&sc->sc_intr_lock);
 		return EIO;
 	}
 
 	ch->intr = intr;
 	ch->arg = arg;
 
-	/* XXX -1 shouldn't be needed */
-	for (i = 0; i < UAUDIO_NCHANBUFS - 1; i++)
+	for (i = 0; i < UAUDIO_NCHANBUFS; i++)
 		uaudio_chan_ptransfer(ch);
-	mutex_enter(&sc->sc_intr_lock);
 
 	return 0;
 }
@@ -2726,7 +2667,6 @@ uaudio_chan_abort(struct uaudio_softc *sc, struct chan *ch)
 
 	as = &sc->sc_alts[ch->altidx];
 	as->sc_busy = 0;
-	AUFMT_VALIDATE(as->aformat);
 	if (sc->sc_nullalt >= 0) {
 		DPRINTF("set null alt=%d\n", sc->sc_nullalt);
 		usbd_set_interface(as->ifaceh, sc->sc_nullalt);
@@ -2828,7 +2768,7 @@ uaudio_chan_ptransfer(struct chan *ch)
 	 * Transfer data from upper layer buffer to channel buffer, taking
 	 * care of wrapping the upper layer buffer.
 	 */
-	n = min(total, ch->end - ch->cur);
+	n = uimin(total, ch->end - ch->cur);
 	memcpy(cb->buffer, ch->cur, n);
 	ch->cur += n;
 	if (ch->cur >= ch->end)
@@ -2880,8 +2820,8 @@ uaudio_chan_pintr(struct usbd_xfer *xfer, void *priv,
 	}
 #endif
 
-	ch->transferred += cb->size;
 	mutex_enter(&ch->sc->sc_intr_lock);
+	ch->transferred += cb->size;
 	/* Call back to upper layer */
 	while (ch->transferred >= ch->blksize) {
 		ch->transferred -= ch->blksize;
@@ -2969,7 +2909,7 @@ uaudio_chan_rintr(struct usbd_xfer *xfer, void *priv,
 	 */
 	for (i = 0; i < UAUDIO_NFRAMES; i++) {
 		frsize = cb->sizes[i];
-		n = min(frsize, ch->end - ch->cur);
+		n = uimin(frsize, ch->end - ch->cur);
 		memcpy(ch->cur, cb->buffer + cb->offsets[i], n);
 		ch->cur += n;
 		if (ch->cur >= ch->end)
@@ -2982,8 +2922,8 @@ uaudio_chan_rintr(struct usbd_xfer *xfer, void *priv,
 	}
 
 	/* Call back to upper layer */
-	ch->transferred += count;
 	mutex_enter(&ch->sc->sc_intr_lock);
+	ch->transferred += count;
 	while (ch->transferred >= ch->blksize) {
 		ch->transferred -= ch->blksize;
 		DPRINTFN(5, "call %p(%p)\n", ch->intr, ch->arg);
@@ -3029,15 +2969,12 @@ uaudio_chan_set_param(struct chan *ch, u_char *start, u_char *end, int blksize)
 }
 
 Static int
-uaudio_set_params(void *addr, int setmode, int usemode,
-		  struct audio_params *play, struct audio_params *rec,
-		  stream_filter_list_t *pfil, stream_filter_list_t *rfil)
+uaudio_set_format(void *addr, int setmode,
+		  const audio_params_t *play, const audio_params_t *rec,
+		  audio_filter_reg_t *pfil, audio_filter_reg_t *rfil)
 {
 	struct uaudio_softc *sc;
 	int paltidx, raltidx;
-	struct audio_params *p;
-	stream_filter_list_t *fil;
-	int mode, i;
 
 	sc = addr;
 	paltidx = -1;
@@ -3045,65 +2982,35 @@ uaudio_set_params(void *addr, int setmode, int usemode,
 	if (sc->sc_dying)
 		return EIO;
 
-	if (((usemode & AUMODE_PLAY) && sc->sc_playchan.pipe != NULL) ||
-	    ((usemode & AUMODE_RECORD) && sc->sc_recchan.pipe != NULL))
-		return EBUSY;
-
-	if ((usemode & AUMODE_PLAY) && sc->sc_playchan.altidx != -1) {
+	if ((setmode & AUMODE_PLAY) && sc->sc_playchan.altidx != -1) {
 		sc->sc_alts[sc->sc_playchan.altidx].sc_busy = 0;
-		AUFMT_VALIDATE(sc->sc_alts[sc->sc_playchan.altidx].aformat);
 	}
-	if ((usemode & AUMODE_RECORD) && sc->sc_recchan.altidx != -1) {
+	if ((setmode & AUMODE_RECORD) && sc->sc_recchan.altidx != -1) {
 		sc->sc_alts[sc->sc_recchan.altidx].sc_busy = 0;
-		AUFMT_VALIDATE(sc->sc_alts[sc->sc_recchan.altidx].aformat);
 	}
 
 	/* Some uaudio devices are unidirectional.  Don't try to find a
 	   matching mode for the unsupported direction. */
 	setmode &= sc->sc_mode;
 
-	for (mode = AUMODE_RECORD; mode != -1;
-	     mode = mode == AUMODE_RECORD ? AUMODE_PLAY : -1) {
-		if ((setmode & mode) == 0)
-			continue;
-
-		if (mode == AUMODE_PLAY) {
-			p = play;
-			fil = pfil;
-		} else {
-			p = rec;
-			fil = rfil;
-		}
-		i = auconv_set_converter(sc->sc_formats, sc->sc_nformats,
-					 mode, p, TRUE, fil);
-		if (i < 0)
-			return EINVAL;
-
-		if (mode == AUMODE_PLAY)
-			paltidx = i;
-		else
-			raltidx = i;
-	}
-
 	if ((setmode & AUMODE_PLAY)) {
-		p = pfil->req_size > 0 ? &pfil->filters[0].param : play;
-		/* XXX abort transfer if currently happening? */
-		uaudio_chan_init(&sc->sc_playchan, paltidx, p, 0);
+		paltidx = audio_indexof_format(sc->sc_formats, sc->sc_nformats,
+		    AUMODE_PLAY, play);
+		/* Transfer should have halted */
+		uaudio_chan_init(&sc->sc_playchan, paltidx, play, 0);
 	}
 	if ((setmode & AUMODE_RECORD)) {
-		p = rfil->req_size > 0 ? &rfil->filters[0].param : rec;
-		/* XXX abort transfer if currently happening? */
-		uaudio_chan_init(&sc->sc_recchan, raltidx, p,
-		    UGETW(sc->sc_alts[raltidx].edesc->wMaxPacketSize));
+		raltidx = audio_indexof_format(sc->sc_formats, sc->sc_nformats,
+		    AUMODE_RECORD, rec);
+		/* Transfer should have halted */
+		uaudio_chan_init(&sc->sc_recchan, raltidx, rec, 0);
 	}
 
-	if ((usemode & AUMODE_PLAY) && sc->sc_playchan.altidx != -1) {
+	if ((setmode & AUMODE_PLAY) && sc->sc_playchan.altidx != -1) {
 		sc->sc_alts[sc->sc_playchan.altidx].sc_busy = 1;
-		AUFMT_INVALIDATE(sc->sc_alts[sc->sc_playchan.altidx].aformat);
 	}
-	if ((usemode & AUMODE_RECORD) && sc->sc_recchan.altidx != -1) {
+	if ((setmode & AUMODE_RECORD) && sc->sc_recchan.altidx != -1) {
 		sc->sc_alts[sc->sc_recchan.altidx].sc_busy = 1;
-		AUFMT_INVALIDATE(sc->sc_alts[sc->sc_recchan.altidx].aformat);
 	}
 
 	DPRINTF("use altidx=p%d/r%d, altno=p%d/r%d\n",

@@ -1,4 +1,4 @@
-/*	$NetBSD: irframe_tty.c,v 1.61 2015/08/20 14:40:18 christos Exp $	*/
+/*	$NetBSD: irframe_tty.c,v 1.63 2019/01/24 09:33:03 knakahara Exp $	*/
 
 /*
  * TODO
@@ -41,7 +41,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: irframe_tty.c,v 1.61 2015/08/20 14:40:18 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: irframe_tty.c,v 1.63 2019/01/24 09:33:03 knakahara Exp $");
 
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -376,6 +376,12 @@ irframetioctl(struct tty *tp, u_long cmd, void *data, int flag,
 	int d;
 
 	DPRINTF(("%s: tp=%p\n", __func__, tp));
+
+	/*
+	 * XXX
+	 * This function can be called without KERNEL_LOCK when caller's
+	 * struct cdevsw is set D_MPSAFE. Is KERNEL_LOCK required?
+	 */
 
 	if (sc == NULL || tp != sc->sc_tp)
 		return (EPASSTHROUGH);
@@ -823,10 +829,19 @@ filt_irframetwrite(struct knote *kn, long hint)
 	return (0);
 }
 
-static const struct filterops irframetread_filtops =
-	{ 1, NULL, filt_irframetrdetach, filt_irframetread };
-static const struct filterops irframetwrite_filtops =
-	{ 1, NULL, filt_irframetwdetach, filt_irframetwrite };
+static const struct filterops irframetread_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_irframetrdetach,
+	.f_event = filt_irframetread,
+};
+
+static const struct filterops irframetwrite_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_irframetwdetach,
+	.f_event = filt_irframetwrite,
+};
 
 int
 irframet_kqfilter(void *h, struct knote *kn)

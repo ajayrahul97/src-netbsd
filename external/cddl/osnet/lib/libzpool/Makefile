@@ -1,4 +1,8 @@
-#	$NetBSD: Makefile,v 1.10 2015/04/10 22:36:50 riastradh Exp $
+#	$NetBSD: Makefile,v 1.12.4.1 2019/09/27 09:24:29 martin Exp $
+
+.include <bsd.init.mk>
+
+USE_SHLIBDIR=	yes
 
 .include "${.CURDIR}/../../dist/uts/common/Makefile.files"
 .include "../../Makefile.zfs"
@@ -18,13 +22,15 @@ LIBDPLIBS+= \
 
 LIB=		zpool
 CPPFLAGS+=	-std=c99
-#CPPFLAGS+=-Wall -Wno-unknown-pragmas
+
+CWARNFLAGS+=	-Wno-missing-field-initializers
+CWARNFLAGS+=	-Wno-parentheses
 
 # Local stuff
-SRCS=		kernel.c kernel2.c atomic.c
+SRCS+=		kernel.c atomic.c
 
 # Sun stuff
-SRCS+=		${ZFS_COMMON_OBJS:C/.o$/.c/}
+SRCS+=		${ZFS_COMMON_OBJS:C/.o$/.c/} vdev_file.c trim_map.c
 SRCS+=		${ZFS_SHARED_OBJS:C/.o$/.c/}
 SRCS+=		taskq.c util.c list.c u8_textprep.c
 

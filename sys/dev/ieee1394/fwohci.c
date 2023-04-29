@@ -1,4 +1,4 @@
-/*	$NetBSD: fwohci.c,v 1.137 2014/02/25 18:30:09 pooka Exp $	*/
+/*	$NetBSD: fwohci.c,v 1.142.2.2 2020/01/31 11:14:51 martin Exp $	*/
 
 /*-
  * Copyright (c) 2003 Hidetoshi Shimokawa
@@ -37,7 +37,7 @@
  *
  */
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: fwohci.c,v 1.137 2014/02/25 18:30:09 pooka Exp $");
+__KERNEL_RCSID(0, "$NetBSD: fwohci.c,v 1.142.2.2 2020/01/31 11:14:51 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/atomic.h>
@@ -224,7 +224,7 @@ static void fwohci_arcv(struct fwohci_softc *, struct fwohci_dbch *);
 #define	OHCI_ATRETRY		0x008
 #define	OHCI_CROMHDR		0x018
 #define	OHCI_BUS_OPT		0x020
-#define	OHCI_BUSIRMC		(1 << 31)
+#define	OHCI_BUSIRMC		(1U << 31)
 #define	OHCI_BUSCMC		(1 << 30)
 #define	OHCI_BUSISC		(1 << 29)
 #define	OHCI_BUSBMC		(1 << 28)
@@ -250,7 +250,7 @@ static void fwohci_arcv(struct fwohci_softc *, struct fwohci_dbch *);
 
 #define	OHCI_SID_BUF		0x064
 #define	OHCI_SID_CNT		0x068
-#define OHCI_SID_ERR		(1 << 31)
+#define OHCI_SID_ERR		(1U << 31)
 #define OHCI_SID_CNT_MASK	0xffc
 
 #define	OHCI_IT_STAT		0x090
@@ -439,6 +439,8 @@ fwohci_attach(struct fwohci_softc *sc)
 		sc->ir[i].off = OHCI_IROFF(i);
 	}
 
+	fw_init_isodma(&sc->fc);
+
 	sc->fc.config_rom = fwdma_alloc_setup(sc->fc.dev, sc->fc.dmat,
 	    CROMSIZE, &sc->crom_dma, CROMSIZE, BUS_DMA_NOWAIT);
 	if (sc->fc.config_rom == NULL) {
@@ -458,7 +460,7 @@ fwohci_attach(struct fwohci_softc *sc)
 	sc->fc.config_rom[0] |= fw_crc16(&sc->fc.config_rom[1], 5*4);
 #endif
 
-/* SID recieve buffer must align 2^11 */
+/* SID receive buffer must align 2^11 */
 #define	OHCI_SIDSIZE	(1 << 11)
 	sc->sid_buf = fwdma_alloc_setup(sc->fc.dev, sc->fc.dmat, OHCI_SIDSIZE,
 	    &sc->sid_dma, OHCI_SIDSIZE, BUS_DMA_NOWAIT);
@@ -532,6 +534,7 @@ fwohci_detach(struct fwohci_softc *sc, int flags)
 		fwohci_db_free(sc, &sc->ir[i]);
 	}
 
+	fw_destroy_isodma(&sc->fc);
 	fw_destroy(&sc->fc);
 
 	return 0;
@@ -641,7 +644,7 @@ fwohci_stop(struct fwohci_softc *sc)
 	    OHCI_INT_DMA_ARRS |
 	    OHCI_INT_PHY_BUS_R);
 
-/* FLUSH FIFO and reset Transmitter/Reciever */
+/* FLUSH FIFO and reset Transmitter/Receiver */
 	OWRITE(sc, OHCI_HCCCTL, OHCI_HCC_RESET);
 #endif
 
@@ -749,7 +752,7 @@ fwohci_set_bus_manager(struct firewire_comm *fc, u_int node)
 	OWRITE(sc, OHCI_CSR_DATA, node);
 	OWRITE(sc, OHCI_CSR_COMP, 0x3f);
 	OWRITE(sc, OHCI_CSR_CONT, OHCI_BUS_MANAGER_ID);
- 	for (i = 0; !(OREAD(sc, OHCI_CSR_CONT) & (1<<31)) && (i < 1000); i++)
+ 	for (i = 0; !(OREAD(sc, OHCI_CSR_CONT) & (1U <<31)) && (i < 1000); i++)
 		DELAY(10);
 	bm = OREAD(sc, OHCI_CSR_DATA);
 	if ((bm & 0x3f) == 0x3f)
@@ -1235,7 +1238,7 @@ fwohci_reset(struct fwohci_softc *sc)
 		OWRITE(sc, OHCI_ITCTLCLR(i), OHCI_CNTL_DMA_RUN);
 	}
 
-	/* FLUSH FIFO and reset Transmitter/Reciever */
+	/* FLUSH FIFO and reset Transmitter/Receiver */
 	OWRITE(sc, OHCI_HCCCTL, OHCI_HCC_RESET);
 	if (firewire_debug)
 		printf("resetting OHCI...");
@@ -1293,7 +1296,7 @@ fwohci_reset(struct fwohci_softc *sc)
 	/* AT Retries */
 	OWRITE(sc, FWOHCI_RETRY,
 	    /* CycleLimit   PhyRespRetries ATRespRetries ATReqRetries */
-	    (0xffff << 16) | (0x0f << 8) | (0x0f << 4) | 0x0f);
+	    (0xffffU << 16) | (0x0f << 8) | (0x0f << 4) | 0x0f);
 
 	sc->atrq.top = STAILQ_FIRST(&sc->atrq.db_trq);
 	sc->atrs.top = STAILQ_FIRST(&sc->atrs.db_trq);
@@ -1743,8 +1746,8 @@ fwohci_db_init(struct fwohci_softc *sc, struct fwohci_dbch *dbch)
 	    dbch->ndb, BUS_DMA_WAITOK);
 #else	/* Ooops, debugging now... */
 	    dbch->ndb, BUS_DMA_WAITOK |
-		(dbch->off == OHCI_ARQOFF || dbch->off == OHCI_ARSOFF) ?
-							BUS_DMA_COHERENT : 0);
+		((dbch->off == OHCI_ARQOFF || dbch->off == OHCI_ARSOFF) ?
+							BUS_DMA_COHERENT : 0));
 #endif
 	if (dbch->am == NULL) {
 		aprint_error_dev(fc->dev, "fwdma_malloc_multiseg failed\n");
@@ -2010,7 +2013,7 @@ fwohci_intr_core(struct fwohci_softc *sc, uint32_t stat)
 		OWRITE(sc, FWOHCI_INTMASK, OHCI_INT_PHY_BUS_R);
 
 		/* Allow async. request to us */
-		OWRITE(sc, OHCI_AREQHI, 1 << 31);
+		OWRITE(sc, OHCI_AREQHI, 1U << 31);
 		if (firewire_phydma_enable) {
 			/* allow from all nodes */
 			OWRITE(sc, OHCI_PREQHI, 0x7fffffff);
@@ -2226,9 +2229,9 @@ fwohci_tbuf_update(struct fwohci_softc *sc, int dmach)
 		STAILQ_INSERT_TAIL(&it->stfree, chunk, link);
 		w++;
 	}
-	mutex_exit(&fc->fc_mtx);
 	if (w)
-		wakeup(it);
+		cv_broadcast(&it->cv);
+	mutex_exit(&fc->fc_mtx);
 }
 
 static void
@@ -2283,14 +2286,15 @@ fwohci_rbuf_update(struct fwohci_softc *sc, int dmach)
 		}
 		w++;
 	}
-	if ((ir->flag & FWXFERQ_HANDLER) == 0)
+	if ((ir->flag & FWXFERQ_HANDLER) == 0) {
+		if (w)
+			cv_broadcast(&ir->cv);
 		mutex_exit(&fc->fc_mtx);
+	}
 	if (w == 0)
 		return;
 	if (ir->flag & FWXFERQ_HANDLER)
 		ir->hand(ir);
-	else
-		wakeup(ir);
 }
 
 static void
@@ -2504,7 +2508,7 @@ fwohci_txbufdb(struct fwohci_softc *sc, int dmach, struct fw_bulkxfer *bulkxfer)
 	unsigned short chtag;
 	int idb;
 
-	KASSERT(mutex_owner(&sc->fc.fc_mtx));
+	KASSERT(mutex_owned(&sc->fc.fc_mtx));
 
 	dbch = &sc->it[dmach];
 	chtag = sc->it[dmach].xferq.flag & 0xff;

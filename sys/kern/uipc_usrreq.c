@@ -1,4 +1,4 @@
-/*	$NetBSD: uipc_usrreq.c,v 1.180 2016/04/06 19:45:45 roy Exp $	*/
+/*	$NetBSD: uipc_usrreq.c,v 1.194 2019/07/29 09:42:17 maxv Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2000, 2004, 2008, 2009 The NetBSD Foundation, Inc.
@@ -96,7 +96,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: uipc_usrreq.c,v 1.180 2016/04/06 19:45:45 roy Exp $");
+__KERNEL_RCSID(0, "$NetBSD: uipc_usrreq.c,v 1.194 2019/07/29 09:42:17 maxv Exp $");
+
+#ifdef _KERNEL_OPT
+#include "opt_compat_netbsd.h"
+#endif
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -119,10 +123,10 @@ __KERNEL_RCSID(0, "$NetBSD: uipc_usrreq.c,v 1.180 2016/04/06 19:45:45 roy Exp $"
 #include <sys/uidinfo.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
+#include <sys/compat_stub.h>
 
-#ifdef COMPAT_70
 #include <compat/sys/socket.h>
-#endif
+#include <compat/net/route_70.h>
 
 /*
  * Unix communications domain.
@@ -193,6 +197,20 @@ static lwp_t *unp_thread_lwp;
 static SLIST_HEAD(,file) unp_thread_discard;
 static int unp_defer;
 
+/* Compat interface */
+
+struct mbuf * stub_compat_70_unp_addsockcred(lwp_t *, struct mbuf *);
+
+struct mbuf * stub_compat_70_unp_addsockcred(struct lwp *lwp,
+    struct mbuf *control)
+{
+
+/* just copy our initial argument */
+	return control;
+}
+
+bool compat70_ocreds_valid = false;
+
 /*
  * Initialize Unix protocols.
  */
@@ -208,6 +226,15 @@ uipc_init(void)
 	    NULL, &unp_thread_lwp, "unpgc");
 	if (error != 0)
 		panic("uipc_init %d", error);
+}
+
+static void
+unp_connid(struct lwp *l, struct unpcb *unp, int flags)
+{
+	unp->unp_connid.unp_pid = l->l_proc->p_pid;
+	unp->unp_connid.unp_euid = kauth_cred_geteuid(l->l_cred);
+	unp->unp_connid.unp_egid = kauth_cred_getegid(l->l_cred);
+	unp->unp_flags |= flags;
 }
 
 /*
@@ -323,20 +350,21 @@ unp_output(struct mbuf *m, struct mbuf *control, struct unpcb *unp)
 		sun = &sun_noname;
 	if (unp->unp_conn->unp_flags & UNP_WANTCRED)
 		control = unp_addsockcred(curlwp, control);
-#ifdef COMPAT_SOCKCRED70
 	if (unp->unp_conn->unp_flags & UNP_OWANTCRED)
-		control = compat_70_unp_addsockcred(curlwp, control);
-#endif
+		MODULE_HOOK_CALL(uipc_unp_70_hook, (curlwp, control),
+		    stub_compat_70_unp_addsockcred(curlwp, control), control);
 	if (sbappendaddr(&so2->so_rcv, (const struct sockaddr *)sun, m,
 	    control) == 0) {
-		so2->so_rcv.sb_overflowed++;
 		unp_dispose(control);
 		m_freem(control);
 		m_freem(m);
-		return (ENOBUFS);
+		/* Don't call soroverflow because we're returning this
+		 * error directly to the sender. */
+		so2->so_rcv.sb_overflowed++;
+		return ENOBUFS;
 	} else {
 		sorwakeup(so2);
-		return (0);
+		return 0;
 	}
 }
 
@@ -499,16 +527,16 @@ unp_send(struct socket *so, struct mbuf *m, struct sockaddr *nam,
 			unp->unp_conn->unp_flags &= ~UNP_WANTCRED;
 			control = unp_addsockcred(l, control);
 		}
-#ifdef COMPAT_SOCKCRED70
 		if (unp->unp_conn->unp_flags & UNP_OWANTCRED) {
 			/*
 			 * Credentials are passed only once on
 			 * SOCK_STREAM and SOCK_SEQPACKET.
 			 */
 			unp->unp_conn->unp_flags &= ~UNP_OWANTCRED;
-			control = compat_70_unp_addsockcred(l, control);
+			MODULE_HOOK_CALL(uipc_unp_70_hook, (curlwp, control),
+			    stub_compat_70_unp_addsockcred(curlwp, control),
+			    control);
 		}
-#endif
 		/*
 		 * Send to paired receive port, and then reduce
 		 * send buffer hiwater marks to maintain backpressure.
@@ -582,11 +610,14 @@ uipc_ctloutput(int op, struct socket *so, struct sockopt *sopt)
 
 	case PRCO_SETOPT:
 		switch (sopt->sopt_name) {
+		case LOCAL_OCREDS:
+			if (!compat70_ocreds_valid)  {
+				error = ENOPROTOOPT;
+				break;
+			}
+			/* FALLTHROUGH */
 		case LOCAL_CREDS:
 		case LOCAL_CONNWAIT:
-#ifdef COMPAT_SOCKCRED70
-		case LOCAL_OCREDS:
-#endif
 			error = sockopt_getint(sopt, &optval);
 			if (error)
 				break;
@@ -603,11 +634,9 @@ uipc_ctloutput(int op, struct socket *so, struct sockopt *sopt)
 			case LOCAL_CONNWAIT:
 				OPTSET(UNP_CONNWAIT);
 				break;
-#ifdef COMPAT_SOCKCRED70
 			case LOCAL_OCREDS:
 				OPTSET(UNP_OWANTCRED);
 				break;
-#endif
 			}
 			break;
 #undef OPTSET
@@ -623,8 +652,8 @@ uipc_ctloutput(int op, struct socket *so, struct sockopt *sopt)
 		switch (sopt->sopt_name) {
 		case LOCAL_PEEREID:
 			if (unp->unp_flags & UNP_EIDSVALID) {
-				error = sockopt_set(sopt,
-				    &unp->unp_connid, sizeof(unp->unp_connid));
+				error = sockopt_set(sopt, &unp->unp_connid,
+				    sizeof(unp->unp_connid));
 			} else {
 				error = EINVAL;
 			}
@@ -635,14 +664,14 @@ uipc_ctloutput(int op, struct socket *so, struct sockopt *sopt)
 			optval = OPTBIT(UNP_WANTCRED);
 			error = sockopt_setint(sopt, optval);
 			break;
-#ifdef COMPAT_SOCKCRED70
 		case LOCAL_OCREDS:
-			optval = OPTBIT(UNP_OWANTCRED);
-			error = sockopt_setint(sopt, optval);
-			break;
-#endif
+			if (compat70_ocreds_valid) {
+				optval = OPTBIT(UNP_OWANTCRED);
+				error = sockopt_setint(sopt, optval);
+				break;
+			}
 #undef OPTBIT
-
+			/* FALLTHROUGH */
 		default:
 			error = ENOPROTOOPT;
 			break;
@@ -661,11 +690,13 @@ uipc_ctloutput(int op, struct socket *so, struct sockopt *sopt)
  * and don't really want to reserve the sendspace.  Their recvspace should
  * be large enough for at least one max-size datagram plus address.
  */
-#define	PIPSIZ	4096
+#ifndef PIPSIZ
+#define	PIPSIZ	8192
+#endif
 u_long	unpst_sendspace = PIPSIZ;
 u_long	unpst_recvspace = PIPSIZ;
 u_long	unpdg_sendspace = 2*1024;	/* really max datagram size */
-u_long	unpdg_recvspace = 4*1024;
+u_long	unpdg_recvspace = 16*1024;
 
 u_int	unp_rights;			/* files in flight */
 u_int	unp_rights_ratio = 2;		/* limit, fraction of maxfiles */
@@ -982,10 +1013,6 @@ unp_bind(struct socket *so, struct sockaddr *nam, struct lwp *l)
 	unp->unp_vnode = vp;
 	unp->unp_addrlen = addrlen;
 	unp->unp_addr = sun;
-	unp->unp_connid.unp_pid = p->p_pid;
-	unp->unp_connid.unp_euid = kauth_cred_geteuid(l->l_cred);
-	unp->unp_connid.unp_egid = kauth_cred_getegid(l->l_cred);
-	unp->unp_flags |= UNP_EIDSBIND;
 	VOP_UNLOCK(vp);
 	vput(nd.ni_dvp);
 	unp->unp_flags &= ~UNP_BUSY;
@@ -1015,6 +1042,7 @@ unp_listen(struct socket *so, struct lwp *l)
 	if (unp->unp_vnode == NULL)
 		return EINVAL;
 
+	unp_connid(l, unp, UNP_EIDSBIND);
 	return 0;
 }
 
@@ -1078,17 +1106,6 @@ unp_connect1(struct socket *so, struct socket *so2, struct lwp *l)
 	unp2 = sotounpcb(so2);
 	unp->unp_conn = unp2;
 
-	if ((so->so_proto->pr_flags & PR_CONNREQUIRED) != 0) {
-		unp2->unp_connid.unp_pid = l->l_proc->p_pid;
-		unp2->unp_connid.unp_euid = kauth_cred_geteuid(l->l_cred);
-		unp2->unp_connid.unp_egid = kauth_cred_getegid(l->l_cred);
-		unp2->unp_flags |= UNP_EIDSVALID;
-		if (unp2->unp_flags & UNP_EIDSBIND) {
-			unp->unp_connid = unp2->unp_connid;
-			unp->unp_flags |= UNP_EIDSVALID;
-		}
-	}
-
 	switch (so->so_type) {
 
 	case SOCK_DGRAM:
@@ -1151,11 +1168,11 @@ unp_connect(struct socket *so, struct sockaddr *nam, struct lwp *l)
 		goto bad2;
 	}
 	vp = nd.ni_vp;
+	pathbuf_destroy(pb);
 	if (vp->v_type != VSOCK) {
 		error = ENOTSOCK;
 		goto bad;
 	}
-	pathbuf_destroy(pb);
 	if ((error = VOP_ACCESS(vp, VWRITE, l->l_cred)) != 0)
 		goto bad;
 	/* Acquire v_interlock to protect against unp_detach(). */
@@ -1199,6 +1216,22 @@ unp_connect(struct socket *so, struct sockaddr *nam, struct lwp *l)
 		}
 		unp3->unp_flags = unp2->unp_flags;
 		so2 = so3;
+		/*
+		 * The connector's (client's) credentials are copied from its
+		 * process structure at the time of connect() (which is now).
+		 */
+		unp_connid(l, unp3, UNP_EIDSVALID);
+		 /*
+		  * The receiver's (server's) credentials are copied from the
+		  * unp_peercred member of socket on which the former called
+		  * listen(); unp_listen() cached that process's credentials
+		  * at that time so we can use them now.
+		  */
+		if (unp2->unp_flags & UNP_EIDSBIND) {
+			memcpy(&unp->unp_connid, &unp2->unp_connid,
+			    sizeof(unp->unp_connid));
+			unp->unp_flags |= UNP_EIDSVALID;
+		}
 	}
 	error = unp_connect1(so, so2, l);
 	if (error) {
@@ -1225,7 +1258,7 @@ unp_connect(struct socket *so, struct sockaddr *nam, struct lwp *l)
 		/*
 		 * If the connection is fully established, break the
 		 * association with uipc_lock and give the connected
-		 * pair a seperate lock to share.
+		 * pair a separate lock to share.
 		 */
 		KASSERT(so2->so_head != NULL);
 		unp_setpeerlocks(so, so2);
@@ -1267,10 +1300,6 @@ unp_connect2(struct socket *so, struct socket *so2)
 	case SOCK_SEQPACKET: /* FALLTHROUGH */
 	case SOCK_STREAM:
 		unp2->unp_conn = unp;
-		if ((so->so_proto->pr_flags & PR_CONNREQUIRED) != 0) {
-			unp->unp_connid = unp2->unp_connid;
-			unp->unp_flags |= UNP_EIDSVALID;
-		}
 		soisconnected(so);
 		soisconnected(so2);
 		break;
@@ -1544,6 +1573,7 @@ unp_internalize(struct mbuf **controlp)
 		goto out;
 	}
 	memcpy(newcm, cm, sizeof(struct cmsghdr));
+	memset(newcm + 1, 0, CMSG_LEN(0) - sizeof(struct cmsghdr));
 	files = (file_t **)CMSG_DATA(newcm);
 
 	/*
@@ -1952,6 +1982,47 @@ unp_discard_later(file_t *fp)
 		SLIST_INSERT_HEAD(&unp_thread_discard, fp, f_unplist);
 	}
 	mutex_exit(&filelist_lock);
+}
+
+void
+unp_sysctl_create(struct sysctllog **clog)
+{
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READWRITE,
+		       CTLTYPE_LONG, "sendspace",
+		       SYSCTL_DESCR("Default stream send space"),
+		       NULL, 0, &unpst_sendspace, 0,
+		       CTL_NET, PF_LOCAL, SOCK_STREAM, CTL_CREATE, CTL_EOL);
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READWRITE,
+		       CTLTYPE_LONG, "recvspace",
+		       SYSCTL_DESCR("Default stream recv space"),
+		       NULL, 0, &unpst_recvspace, 0,
+		       CTL_NET, PF_LOCAL, SOCK_STREAM, CTL_CREATE, CTL_EOL);
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READWRITE,
+		       CTLTYPE_LONG, "sendspace",
+		       SYSCTL_DESCR("Default datagram send space"),
+		       NULL, 0, &unpdg_sendspace, 0,
+		       CTL_NET, PF_LOCAL, SOCK_DGRAM, CTL_CREATE, CTL_EOL);
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READWRITE,
+		       CTLTYPE_LONG, "recvspace",
+		       SYSCTL_DESCR("Default datagram recv space"),
+		       NULL, 0, &unpdg_recvspace, 0,
+		       CTL_NET, PF_LOCAL, SOCK_DGRAM, CTL_CREATE, CTL_EOL);
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READONLY,
+		       CTLTYPE_INT, "inflight",
+		       SYSCTL_DESCR("File descriptors in flight"),
+		       NULL, 0, &unp_rights, 0,
+		       CTL_NET, PF_LOCAL, CTL_CREATE, CTL_EOL);
+	sysctl_createv(clog, 0, NULL, NULL,
+		       CTLFLAG_PERMANENT|CTLFLAG_READONLY,
+		       CTLTYPE_INT, "deferred",
+		       SYSCTL_DESCR("File descriptors deferred for close"),
+		       NULL, 0, &unp_defer, 0,
+		       CTL_NET, PF_LOCAL, CTL_CREATE, CTL_EOL);
 }
 
 const struct pr_usrreqs unp_usrreqs = {

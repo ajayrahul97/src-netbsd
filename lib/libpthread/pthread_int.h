@@ -1,4 +1,4 @@
-/*	$NetBSD: pthread_int.h,v 1.92 2015/05/29 16:05:13 christos Exp $	*/
+/*	$NetBSD: pthread_int.h,v 1.95.2.2 2020/01/26 10:55:16 martin Exp $	*/
 
 /*-
  * Copyright (c) 2001, 2002, 2003, 2006, 2007, 2008 The NetBSD Foundation, Inc.
@@ -27,11 +27,6 @@
  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
- */
-
-/*
- * NOTE: when changing anything in this file, please ensure that
- * libpthread_dbg still compiles.
  */
 
 #ifndef _LIB_PTHREAD_INT_H
@@ -63,7 +58,7 @@
 #define	PTHREAD_HIDE	/* nothing */
 #endif
 
-#define	PTHREAD__UNPARK_MAX	32
+#define	PTHREAD__UNPARK_MAX	128
 
 /*
  * The size of this structure needs to be no larger than struct
@@ -136,7 +131,6 @@ struct	__pthread_st {
 	 */
 	int		pt_dummy1 __aligned(128);
 	struct lwpctl 	*pt_lwpctl;	/* Kernel/user comms area */
-	volatile int	pt_blocking;	/* Blocking in userspace */
 	volatile int	pt_rwlocked;	/* Handed rwlock successfully */
 	volatile int	pt_signalled;	/* Received pthread_cond_signal() */
 	volatile int	pt_mutexwait;	/* Waiting to acquire mutex */
@@ -176,6 +170,7 @@ struct	__pthread_st {
 #define PT_ATTR_DEAD	0xDEAD0002
 
 extern size_t	pthread__stacksize;
+extern size_t	pthread__guardsize;
 extern size_t	pthread__pagesize;
 extern int	pthread__nspins;
 extern int	pthread__concurrency;
@@ -294,6 +289,8 @@ pthread__self(void)
 
 void 	*pthread_tsd_init(size_t *) PTHREAD_HIDE;
 void	pthread__destroy_tsd(pthread_t) PTHREAD_HIDE;
+void	pthread__copy_tsd(pthread_t) PTHREAD_HIDE;
+
 __dead void	pthread__assertfunc(const char *, int, const char *, const char *)
 			    PTHREAD_HIDE;
 void	pthread__errorfunc(const char *, int, const char *, const char *)

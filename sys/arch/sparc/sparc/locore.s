@@ -1,4 +1,4 @@
-/*	$NetBSD: locore.s,v 1.268 2012/11/04 00:32:47 chs Exp $	*/
+/*	$NetBSD: locore.s,v 1.274 2019/06/07 00:18:26 mrg Exp $	*/
 
 /*
  * Copyright (c) 1996 Paul Kranenburg
@@ -53,7 +53,6 @@
 #include "opt_ddb.h"
 #include "opt_kgdb.h"
 #include "opt_compat_netbsd.h"
-#include "opt_compat_svr4.h"
 #include "opt_compat_sunos.h"
 #include "opt_multiprocessor.h"
 #include "opt_lockdebug.h"
@@ -5037,149 +5036,88 @@ ENTRY(lwp_trampoline)
 	b	return_from_syscall
 	 add	%l1, 4, %l2		! npc = pc+4
 
-/*
- * {fu,su}{,i}{byte,word}
- */
-_ENTRY(fuiword)
-ENTRY(fuword)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE...
-	bgeu	Lfsbadaddr
-	 .empty
-	btst	3, %o0			! or has low bits set...
-	bnz	Lfsbadaddr		!	go return -1
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfserr;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	Lfserr, %o3
+/**************************************************************************/
+
+#define	UFETCHSTORE_PROLOGUE						 \
+	set	KERNBASE, %o2					 	;\
+	cmp	%o0, %o2		/* if addr >= KERNBASE... */	;\
+	bgeu	Lufetchstore_badaddr				 	;\
+	 .empty							 	;\
+	sethi	%hi(cpcb), %o2		/* cpcb->pcb_onfault =	  */ 	;\
+	ld	[%o2 + %lo(cpcb)], %o2	/*    Lufetchstore_fault  */	;\
+	set	Lufetchstore_fault, %o3				 	;\
 	st	%o3, [%o2 + PCB_ONFAULT]
-	ld	[%o0], %o0		! fetch the word
-	retl				! phew, made it, return the word
-	 st	%g0, [%o2 + PCB_ONFAULT]! but first clear onfault
 
-Lfserr:
-	st	%g0, [%o2 + PCB_ONFAULT]! error in r/w, clear pcb_onfault
-Lfsbadaddr:
-	retl				! and return error indicator
-	 mov	-1, %o0
+	/* keep to a single insn; it's used in a branch delay slot */
+#define	UFETCHSTORE_EPILOGUE						\
+	st	%g0, [%o2 + PCB_ONFAULT]! cpcb->pcb_onfault = NULL
 
-	/*
-	 * This is just like Lfserr, but it's a global label that allows
-	 * mem_access_fault() to check to see that we don't want to try to
-	 * page in the fault.  It's used by fuswintr() etc.
-	 */
+#define	UFETCHSTORE_RETURN_SUCCESS					\
+	retl							;	\
+	 clr	%o0
+
+/* LINTSTUB: int _ufetch_8(const uint8_t *uaddr, uint8_t *valp); */
+ENTRY(_ufetch_8)
+	UFETCHSTORE_PROLOGUE
+	ldub	[%o0], %o0		! %o0 = *uaddr
+	UFETCHSTORE_EPILOGUE
+	stb	%o0, [%o1]		! *valp = %o0
+	UFETCHSTORE_RETURN_SUCCESS
+
+/* LINTSTUB: int _ufetch_16(const uint16_t *uaddr, uint16_t *valp); */
+ENTRY(_ufetch_16)
+	UFETCHSTORE_PROLOGUE
+	lduh	[%o0], %o0		! %o0 = *uaddr
+	UFETCHSTORE_EPILOGUE
+	sth	%o0, [%o1]		! *valp = %o0
+	UFETCHSTORE_RETURN_SUCCESS
+
+/* LINTSTUB: int _ufetch_32(const uint32_t *uaddr, uint32_t *valp); */
+ENTRY(_ufetch_32)
+	UFETCHSTORE_PROLOGUE
+	ld	[%o0], %o0		! %o0 = *uaddr
+	UFETCHSTORE_EPILOGUE
+	st	%o0, [%o1]		! *valp = %o0
+	UFETCHSTORE_RETURN_SUCCESS
+
+/* LINTSTUB: int _ustore_8(uint8_t *uaddr, uint8_t val); */
+ENTRY(_ustore_8)
+	UFETCHSTORE_PROLOGUE
+	stb	%o1, [%o0]		! *uaddr = val
+	UFETCHSTORE_EPILOGUE
+	UFETCHSTORE_RETURN_SUCCESS
+
+/* LINTSTUB: int _ustore_16(uint16_t *uaddr, uint16_t val); */
+ENTRY(_ustore_16)
+	UFETCHSTORE_PROLOGUE
+	sth	%o1, [%o0]		! *uaddr = val
+	UFETCHSTORE_EPILOGUE
+	UFETCHSTORE_RETURN_SUCCESS
+
+/* LINTSTUB: int _ustore_32(uint32_t *uaddr, uint32_t val); */
+ENTRY(_ustore_32)
+	UFETCHSTORE_PROLOGUE
+	st	%o1, [%o0]		! *uaddr = val
+	UFETCHSTORE_EPILOGUE
+	UFETCHSTORE_RETURN_SUCCESS
+
+Lufetchstore_badaddr:
+	retl				! return EFAULT
+	 mov	EFAULT, %o0
+
+Lufetchstore_fault:
+	retl
+	 UFETCHSTORE_EPILOGUE		! error already in %o0
+
+/**************************************************************************/
+
+/* probeget and probeset are meant to be used during autoconfiguration */
+
 	.globl	_C_LABEL(Lfsbail)
 _C_LABEL(Lfsbail):
 	st	%g0, [%o2 + PCB_ONFAULT]! error in r/w, clear pcb_onfault
 	retl				! and return error indicator
 	 mov	-1, %o0
-
-	/*
-	 * Like fusword but callable from interrupt context.
-	 * Fails if data isn't resident.
-	 */
-ENTRY(fuswintr)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE
-	bgeu	Lfsbadaddr		!	return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfsbail;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	_C_LABEL(Lfsbail), %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	lduh	[%o0], %o0		! fetch the halfword
-	retl				! made it
-	st	%g0, [%o2 + PCB_ONFAULT]! but first clear onfault
-
-ENTRY(fusword)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE
-	bgeu	Lfsbadaddr		!	return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfserr;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	Lfserr, %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	lduh	[%o0], %o0		! fetch the halfword
-	retl				! made it
-	st	%g0, [%o2 + PCB_ONFAULT]! but first clear onfault
-
-_ENTRY(fuibyte)
-ENTRY(fubyte)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE
-	bgeu	Lfsbadaddr		!	return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfserr;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	Lfserr, %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	ldub	[%o0], %o0		! fetch the byte
-	retl				! made it
-	st	%g0, [%o2 + PCB_ONFAULT]! but first clear onfault
-
-_ENTRY(suiword)
-ENTRY(suword)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE ...
-	bgeu	Lfsbadaddr
-	 .empty
-	btst	3, %o0			! or has low bits set ...
-	bnz	Lfsbadaddr		!	go return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfserr;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	Lfserr, %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	st	%o1, [%o0]		! store the word
-	st	%g0, [%o2 + PCB_ONFAULT]! made it, clear onfault
-	retl				! and return 0
-	clr	%o0
-
-ENTRY(suswintr)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE
-	bgeu	Lfsbadaddr		!	go return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfsbail;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	_C_LABEL(Lfsbail), %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	sth	%o1, [%o0]		! store the halfword
-	st	%g0, [%o2 + PCB_ONFAULT]! made it, clear onfault
-	retl				! and return 0
-	clr	%o0
-
-ENTRY(susword)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE
-	bgeu	Lfsbadaddr		!	go return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfserr;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	Lfserr, %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	sth	%o1, [%o0]		! store the halfword
-	st	%g0, [%o2 + PCB_ONFAULT]! made it, clear onfault
-	retl				! and return 0
-	clr	%o0
-
-_ENTRY(suibyte)
-ENTRY(subyte)
-	set	KERNBASE, %o2
-	cmp	%o0, %o2		! if addr >= KERNBASE
-	bgeu	Lfsbadaddr		!	go return error
-	 .empty
-	sethi	%hi(cpcb), %o2		! cpcb->pcb_onfault = Lfserr;
-	ld	[%o2 + %lo(cpcb)], %o2
-	set	Lfserr, %o3
-	st	%o3, [%o2 + PCB_ONFAULT]
-	stb	%o1, [%o0]		! store the byte
-	st	%g0, [%o2 + PCB_ONFAULT]! made it, clear onfault
-	retl				! and return 0
-	clr	%o0
-
-/* probeget and probeset are meant to be used during autoconfiguration */
 
 /*
  * probeget(addr, size) void *addr; int size;
@@ -5193,8 +5131,8 @@ ENTRY(subyte)
 ENTRY(probeget)
 	! %o0 = addr, %o1 = (1,2,4)
 	sethi	%hi(cpcb), %o2
-	ld	[%o2 + %lo(cpcb)], %o2	! cpcb->pcb_onfault = Lfserr;
-	set	Lfserr, %o5
+	ld	[%o2 + %lo(cpcb)], %o2	! cpcb->pcb_onfault = Lfsbail;
+	set	Lfsbail, %o5
 	st	%o5, [%o2 + PCB_ONFAULT]
 	btst	1, %o1
 	bnz,a	0f			! if (len & 1)
@@ -5216,8 +5154,8 @@ ENTRY(probeget)
 ENTRY(probeset)
 	! %o0 = addr, %o1 = (1,2,4), %o2 = val
 	sethi	%hi(cpcb), %o3
-	ld	[%o3 + %lo(cpcb)], %o3	! cpcb->pcb_onfault = Lfserr;
-	set	Lfserr, %o5
+	ld	[%o3 + %lo(cpcb)], %o3	! cpcb->pcb_onfault = Lfsbail;
+	set	Lfsbail, %o5
 	st	%o5, [%o3 + PCB_ONFAULT]
 	btst	1, %o1
 	bnz,a	0f			! if (len & 1)
@@ -5331,7 +5269,6 @@ ENTRY(qzero)
 
 ENTRY(bcopy)
 	cmp	%o2, BCOPY_SMALL
-Lbcopy_start:
 	bge,a	Lbcopy_fancy	! if >= this many, go be fancy.
 	btst	7, %o0		! (part of being fancy)
 
@@ -5494,164 +5431,6 @@ Lbcopy_done:
 1:
 	retl
 	 stb	%o4,[%o1]
-/*
- * ovbcopy(src, dst, len): like bcopy, but regions may overlap.
- */
-ENTRY(ovbcopy)
-	cmp	%o0, %o1	! src < dst?
-	bgeu	Lbcopy_start	! no, go copy forwards as via bcopy
-	cmp	%o2, BCOPY_SMALL! (check length for doublecopy first)
-
-	/*
-	 * Since src comes before dst, and the regions might overlap,
-	 * we have to do the copy starting at the end and working backwards.
-	 */
-	add	%o2, %o0, %o0	! src += len
-	add	%o2, %o1, %o1	! dst += len
-	bge,a	Lback_fancy	! if len >= BCOPY_SMALL, go be fancy
-	btst	3, %o0
-
-	/*
-	 * Not much to copy, just do it a byte at a time.
-	 */
-	deccc	%o2		! while (--len >= 0)
-	bl	1f
-	 .empty
-0:
-	dec	%o0		!	*--dst = *--src;
-	ldsb	[%o0], %o4
-	dec	%o1
-	deccc	%o2
-	bge	0b
-	stb	%o4, [%o1]
-1:
-	retl
-	nop
-
-	/*
-	 * Plenty to copy, try to be optimal.
-	 * We only bother with word/halfword/byte copies here.
-	 */
-Lback_fancy:
-!	btst	3, %o0		! done already
-	bnz	1f		! if ((src & 3) == 0 &&
-	btst	3, %o1		!     (dst & 3) == 0)
-	bz,a	Lback_words	!	goto words;
-	dec	4, %o2		! (done early for word copy)
-
-1:
-	/*
-	 * See if the low bits match.
-	 */
-	xor	%o0, %o1, %o3	! t = src ^ dst;
-	btst	1, %o3
-	bz,a	3f		! if (t & 1) == 0, can do better
-	btst	1, %o0
-
-	/*
-	 * Nope; gotta do byte copy.
-	 */
-2:
-	dec	%o0		! do {
-	ldsb	[%o0], %o4	!	*--dst = *--src;
-	dec	%o1
-	deccc	%o2		! } while (--len != 0);
-	bnz	2b
-	stb	%o4, [%o1]
-	retl
-	nop
-
-3:
-	/*
-	 * Can do halfword or word copy, but might have to copy 1 byte first.
-	 */
-!	btst	1, %o0		! done earlier
-	bz,a	4f		! if (src & 1) {	/* copy 1 byte */
-	btst	2, %o3		! (done early)
-	dec	%o0		!	*--dst = *--src;
-	ldsb	[%o0], %o4
-	dec	%o1
-	stb	%o4, [%o1]
-	dec	%o2		!	len--;
-	btst	2, %o3		! }
-
-4:
-	/*
-	 * See if we can do a word copy ((t&2) == 0).
-	 */
-!	btst	2, %o3		! done earlier
-	bz,a	6f		! if (t & 2) == 0, can do word copy
-	btst	2, %o0		! (src&2, done early)
-
-	/*
-	 * Gotta do halfword copy.
-	 */
-	dec	2, %o2		! len -= 2;
-5:
-	dec	2, %o0		! do {
-	ldsh	[%o0], %o4	!	src -= 2;
-	dec	2, %o1		!	dst -= 2;
-	deccc	2, %o0		!	*(short *)dst = *(short *)src;
-	bge	5b		! } while ((len -= 2) >= 0);
-	sth	%o4, [%o1]
-	b	Lback_mopb	! goto mop_up_byte;
-	btst	1, %o2		! (len&1, done early)
-
-6:
-	/*
-	 * We can do word copies, but we might have to copy
-	 * one halfword first.
-	 */
-!	btst	2, %o0		! done already
-	bz	7f		! if (src & 2) {
-	dec	4, %o2		! (len -= 4, done early)
-	dec	2, %o0		!	src -= 2, dst -= 2;
-	ldsh	[%o0], %o4	!	*(short *)dst = *(short *)src;
-	dec	2, %o1
-	sth	%o4, [%o1]
-	dec	2, %o2		!	len -= 2;
-				! }
-
-7:
-Lback_words:
-	/*
-	 * Do word copies (backwards), then mop up trailing halfword
-	 * and byte if any.
-	 */
-!	dec	4, %o2		! len -= 4, done already
-0:				! do {
-	dec	4, %o0		!	src -= 4;
-	dec	4, %o1		!	src -= 4;
-	ld	[%o0], %o4	!	*(int *)dst = *(int *)src;
-	deccc	4, %o2		! } while ((len -= 4) >= 0);
-	bge	0b
-	st	%o4, [%o1]
-
-	/*
-	 * Check for trailing shortword.
-	 */
-	btst	2, %o2		! if (len & 2) {
-	bz,a	1f
-	btst	1, %o2		! (len&1, done early)
-	dec	2, %o0		!	src -= 2, dst -= 2;
-	ldsh	[%o0], %o4	!	*(short *)dst = *(short *)src;
-	dec	2, %o1
-	sth	%o4, [%o1]	! }
-	btst	1, %o2
-
-	/*
-	 * Check for trailing byte.
-	 */
-1:
-Lback_mopb:
-!	btst	1, %o2		! (done already)
-	bnz,a	1f		! if (len & 1) {
-	ldsb	[%o0 - 1], %o4	!	b = src[-1];
-	retl
-	nop
-1:
-	retl			!	dst[-1] = b;
-	stb	%o4, [%o1 - 1]	! }
 
 /*
  * kcopy() is exactly like bcopy except that it set pcb_onfault such that
@@ -5870,8 +5649,6 @@ ENTRY(ipi_savefpstate)
 
 ENTRY(savefpstate)
 	cmp	%o0, 0
-	bz	Lfp_null_fpstate
-	 nop
 	rd	%psr, %o1		! enable FP before we begin
 	set	PSR_EF, %o2
 	or	%o1, %o2, %o1
@@ -5912,26 +5689,6 @@ Lfp_finish:
 	std	%f28, [%o0 + FS_REGS + (4*28)]
 	retl
 	 std	%f30, [%o0 + FS_REGS + (4*30)]
-
-/*
- * We really should panic here but while we figure out what the bug is
- * that a remote CPU gets a NULL struct fpstate *, this lets the system
- * work at least seemingly stably.
- */
-Lfp_null_fpstate:
-#if 1
-	sethi	%hi(CPUINFO_VA), %o5
-	ldd	[%o5 + CPUINFO_SAVEFPSTATE_NULL], %o2
-	inccc   %o3
-	addx    %o2, 0, %o2
-	retl
-	 std	%o2, [%o5 + CPUINFO_SAVEFPSTATE_NULL]
-#else
-	ld	[%o5 + CPUINFO_CPUNO], %o1
-	sethi	%hi(Lpanic_savefpstate), %o0
-	call	_C_LABEL(panic)
-	 or	%o0, %lo(Lpanic_savefpstate), %o0
-#endif
 
 /*
  * Store the (now known nonempty) FP queue.
@@ -6288,8 +6045,9 @@ ENTRY(longjmp)
 	cmp	%fp, %g7	! compare against desired frame
 	bl,a	1b		! if below,
 	 restore		!    pop frame and loop
-	be,a	2f		! if there,
-	 ldd	[%g1+0], %o2	!    fetch return %sp and pc, and get out
+	ld	[%g1+0], %o2	! fetch return %sp
+	be,a	2f		! we're there, get out
+	 ld	[%g1+4], %o3	! fetch return pc
 
 Llongjmpbotch:
 				! otherwise, went too far; bomb out

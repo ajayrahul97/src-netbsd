@@ -1,4 +1,4 @@
-/*	$NetBSD: if_media.c,v 1.30 2009/10/05 21:27:36 dyoung Exp $	*/
+/*	$NetBSD: if_media.c,v 1.46 2019/05/21 09:18:37 msaitoh Exp $	*/
 
 /*-
  * Copyright (c) 1998 The NetBSD Foundation, Inc.
@@ -76,7 +76,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_media.c,v 1.30 2009/10/05 21:27:36 dyoung Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_media.c,v 1.46 2019/05/21 09:18:37 msaitoh Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -89,11 +89,16 @@ __KERNEL_RCSID(0, "$NetBSD: if_media.c,v 1.30 2009/10/05 21:27:36 dyoung Exp $")
 #include <net/if_media.h>
 #include <net/netisr.h>
 
+static void	ifmedia_status(struct ifmedia *, struct ifnet *,
+    struct ifmediareq *);
+static int	_ifmedia_ioctl(struct ifnet *, struct ifreq *,
+    struct ifmedia *, u_long);
+
 /*
  * Compile-time options:
  * IFMEDIA_DEBUG:
- *	turn on implementation-level debug printfs.
- * 	Useful for debugging newly-ported  drivers.
+ *	Turn on implementation-level debug printfs.
+ * 	Useful for debugging newly-ported drivers.
  */
 
 #ifdef IFMEDIA_DEBUG
@@ -113,7 +118,7 @@ ifmedia_init(struct ifmedia *ifm, int dontcare_mask,
 
 	TAILQ_INIT(&ifm->ifm_list);
 	ifm->ifm_cur = NULL;
-	ifm->ifm_media = 0;
+	ifm->ifm_media = IFM_NONE;
 	ifm->ifm_mask = dontcare_mask;		/* IF don't-care bits */
 	ifm->ifm_change = change_callback;
 	ifm->ifm_status = status_callback;
@@ -122,7 +127,19 @@ ifmedia_init(struct ifmedia *ifm, int dontcare_mask,
 int
 ifmedia_change(struct ifmedia *ifm, struct ifnet *ifp)
 {
+
+	if (ifm->ifm_change == NULL)
+		return -1;
 	return (*ifm->ifm_change)(ifp);
+}
+
+static void
+ifmedia_status(struct ifmedia *ifm, struct ifnet *ifp, struct ifmediareq *ifmr)
+{
+
+	if (ifm->ifm_status == NULL)
+		return;
+	(*ifm->ifm_status)(ifp, ifmr);
 }
 
 /*
@@ -206,9 +223,8 @@ ifmedia_set(struct ifmedia *ifm, int target)
 		if (match == NULL) {
 			ifmedia_add(ifm, target, 0, NULL);
 			match = ifmedia_match(ifm, target, ifm->ifm_mask);
-			if (match == NULL) {
+			if (match == NULL)
 				panic("ifmedia_set failed");
-			}
 		}
 	}
 	ifm->ifm_cur = match;
@@ -226,31 +242,19 @@ ifmedia_set(struct ifmedia *ifm, int target)
 /*
  * Device-independent media ioctl support function.
  */
-int
-ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
+static int
+_ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
     u_long cmd)
 {
 	struct ifmedia_entry *match;
-	struct ifmediareq *ifmr = (struct ifmediareq *) ifr;
+	struct ifmediareq *ifmr = (struct ifmediareq *)ifr;
 	int error = 0;
-#ifdef OSIOCSIFMEDIA
-	struct oifreq *oifr = (struct oifreq *)ifr;
-#endif
 
 	if (ifp == NULL || ifr == NULL || ifm == NULL)
-		return (EINVAL);
+		return EINVAL;
 
 	switch (cmd) {
-
-#ifdef OSIOCSIFMEDIA
-	case OSIOCSIFMEDIA:
-		ifr->ifr_media = oifr->ifr_media;
-		/*FALLTHROUGH*/
-#endif
-	/*
-	 * Set the current media.
-	 */
-	case SIOCSIFMEDIA:
+	case SIOCSIFMEDIA:	/* Set the current media. */
 	{
 		struct ifmedia_entry *oldentry;
 		u_int oldmedia;
@@ -260,12 +264,11 @@ ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
 		if (match == NULL) {
 #ifdef IFMEDIA_DEBUG
 			if (ifmedia_debug) {
-				printf(
-				    "ifmedia_ioctl: no media found for 0x%x\n",
-				    newmedia);
+				printf("ifmedia_ioctl: no media found for "
+				    "0x%08x\n", newmedia);
 			}
 #endif
-			return (EINVAL);
+			return EINVAL;
 		}
 
 		/*
@@ -275,8 +278,7 @@ ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
 		 *     Similarly, if best match changed (kernel debugger?).
 		 */
 		if ((IFM_SUBTYPE(newmedia) != IFM_AUTO) &&
-		    (newmedia == ifm->ifm_media) &&
-		    (match == ifm->ifm_cur))
+		    (newmedia == ifm->ifm_media) && (match == ifm->ifm_cur))
 			return 0;
 
 		/*
@@ -303,9 +305,7 @@ ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
 		break;
 	}
 
-	/*
-	 * Get list of available media and current media on interface.
-	 */
+	/* Get list of available media and current media on interface. */
 	case SIOCGIFMEDIA:
 	{
 		struct ifmedia_entry *ep;
@@ -318,8 +318,7 @@ ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
 		    ifm->ifm_cur->ifm_media : IFM_NONE;
 		ifmr->ifm_mask = ifm->ifm_mask;
 		ifmr->ifm_status = 0;
-		/* ifmedia_status */
-		(*ifm->ifm_status)(ifp, ifmr);
+		ifmedia_status(ifm, ifp, ifmr);
 
 		/*
 		 * Count them so we know a-priori how much is the max we'll
@@ -332,13 +331,13 @@ ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
 		if (ifmr->ifm_count != 0) {
 			size_t count;
 			size_t minwords = nwords > (size_t)ifmr->ifm_count
-			    ? (size_t)ifmr->ifm_count
-			    : nwords;
-			int *kptr = (int *)malloc(minwords * sizeof(int),
-			    M_TEMP, M_WAITOK);
-			/*
-			 * Get the media words from the interface's list.
-			 */
+			    ? (size_t)ifmr->ifm_count : nwords;
+			int *kptr = malloc(minwords * sizeof(int), M_TEMP,
+			    M_WAITOK);
+
+			if (kptr == NULL)
+				return ENOMEM;
+			/* Get the media words from the interface's list. */
 			ep = TAILQ_FIRST(&ifm->ifm_list);
 			for (count = 0; ep != NULL && count < minwords;
 			    ep = TAILQ_NEXT(ep, ifm_list), count++)
@@ -350,15 +349,32 @@ ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
 				error = E2BIG;	/* oops! */
 			free(kptr, M_TEMP);
 		}
+		/* Update with the real number */
 		ifmr->ifm_count = nwords;
 		break;
 	}
 
 	default:
-		return (EINVAL);
+		return EINVAL;
 	}
 
-	return (error);
+	return error;
+}
+
+int
+ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, struct ifmedia *ifm,
+    u_long cmd)
+{
+	int e;
+
+	/*
+	 * If if_is_mpsafe(ifp), KERNEL_LOCK isn't held here,
+	 * but _ifmedia_ioctl isn't MP-safe yet, so we must hold the lock.
+	 */
+	KERNEL_LOCK_IF_IFP_MPSAFE(ifp);
+	e = _ifmedia_ioctl(ifp, ifr, ifm, cmd);
+	KERNEL_UNLOCK_IF_IFP_MPSAFE(ifp);
+	return e;
 }
 
 /*
@@ -372,8 +388,7 @@ ifmedia_match(struct ifmedia *ifm, u_int target, u_int mask)
 	match = NULL;
 	mask = ~mask;
 
-	for (next = TAILQ_FIRST(&ifm->ifm_list); next != NULL;
-	     next = TAILQ_NEXT(next, ifm_list)) {
+	TAILQ_FOREACH(next, &ifm->ifm_list, ifm_list) {
 		if ((next->ifm_media & mask) == (target & mask)) {
 			if (match) {
 #if defined(IFMEDIA_DEBUG) || defined(DIAGNOSTIC)
@@ -398,27 +413,24 @@ ifmedia_delete_instance(struct ifmedia *ifm, u_int inst)
 {
 	struct ifmedia_entry *ife, *nife;
 
-	for (ife = TAILQ_FIRST(&ifm->ifm_list); ife != NULL;
-	     ife = nife) {
-		nife = TAILQ_NEXT(ife, ifm_list);
+	TAILQ_FOREACH_SAFE(ife, &ifm->ifm_list, ifm_list, nife) {
 		if (inst == IFM_INST_ANY ||
 		    inst == IFM_INST(ife->ifm_media)) {
 			TAILQ_REMOVE(&ifm->ifm_list, ife, ifm_list);
 			free(ife, M_IFMEDIA);
 		}
 	}
+	if (inst == IFM_INST_ANY) {
+		ifm->ifm_cur = NULL;
+		ifm->ifm_media = IFM_NONE;
+	}
 }
 
 void
 ifmedia_removeall(struct ifmedia *ifm)
 {
-	struct ifmedia_entry *ife, *nife;
 
-	for (ife = TAILQ_FIRST(&ifm->ifm_list); ife != NULL; ife = nife) {
-		nife = TAILQ_NEXT(ife, ifm_list);
-		TAILQ_REMOVE(&ifm->ifm_list, ife, ifm_list);
-		free(ife, M_IFMEDIA);
-	}
+	ifmedia_delete_instance(ifm, IFM_INST_ANY);
 }
 
 
@@ -435,13 +447,13 @@ ifmedia_baudrate(int mword)
 	int i;
 
 	for (i = 0; ifmedia_baudrate_descriptions[i].ifmb_word != 0; i++) {
-		if ((mword & (IFM_NMASK|IFM_TMASK)) ==
-		    ifmedia_baudrate_descriptions[i].ifmb_word)
-			return (ifmedia_baudrate_descriptions[i].ifmb_baudrate);
+		if (IFM_TYPE_SUBTYPE_MATCH(mword,
+		    ifmedia_baudrate_descriptions[i].ifmb_word))
+			return ifmedia_baudrate_descriptions[i].ifmb_baudrate;
 	}
 
 	/* Not known. */
-	return (0);
+	return 0;
 }
 
 #ifdef IFMEDIA_DEBUG

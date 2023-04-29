@@ -95,8 +95,8 @@ uvm_aio_aiodone(struct buf *bp)
 void
 uvm_aio_biodone(struct buf *bp)
 {
-
-	uvm_aio_aiodone(bp);
+	bp->b_iodone = uvm_aio_aiodone;
+	workqueue_enqueue(uvm.aiodone_queue, &bp->b_work, NULL);
 }
 
 /*

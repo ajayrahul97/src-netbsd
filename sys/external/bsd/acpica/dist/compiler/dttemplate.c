@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2019, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,7 +43,6 @@
 
 #include "aslcompiler.h"
 #include "acapps.h"
-#include "dtcompiler.h"
 #include "dttemplate.h" /* Contains the hex ACPI table templates */
 
 #define _COMPONENT          DT_COMPILER
@@ -97,11 +96,11 @@ AcpiUtIsSpecialTable (
     char                    *Signature)
 {
 
-    if (ACPI_COMPARE_NAME (Signature, ACPI_SIG_DSDT) ||
-        ACPI_COMPARE_NAME (Signature, ACPI_SIG_OSDT) ||
-        ACPI_COMPARE_NAME (Signature, ACPI_SIG_SSDT) ||
-        ACPI_COMPARE_NAME (Signature, ACPI_SIG_FACS) ||
-        ACPI_COMPARE_NAME (Signature, ACPI_RSDP_NAME))
+    if (ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_DSDT) ||
+        ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_OSDT) ||
+        ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_SSDT) ||
+        ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_FACS) ||
+        ACPI_COMPARE_NAMESEG (Signature, ACPI_RSDP_NAME))
     {
         return (TRUE);
     }
@@ -207,7 +206,7 @@ Exit:
     /* Shutdown ACPICA subsystem */
 
     (void) AcpiTerminate ();
-    CmDeleteCaches ();
+    UtDeleteLocalCaches ();
     return (Status);
 }
 
@@ -239,7 +238,7 @@ DtCreateOneTemplateFile (
      *  2) Signature must be a recognized ACPI table
      *  3) There must be a template associated with the signature
      */
-    if (strlen (Signature) != ACPI_NAME_SIZE)
+    if (strlen (Signature) != ACPI_NAMESEG_SIZE)
     {
         fprintf (stderr,
             "%s: Invalid ACPI table signature "
@@ -439,7 +438,7 @@ DtCreateOneTemplate (
 
         AcpiOsPrintf (" (static data table)\n");
 
-        if (Gbl_VerboseTemplates)
+        if (AslGbl_VerboseTemplates)
         {
             AcpiOsPrintf (" * Format: [HexOffset DecimalOffset ByteLength]"
                 "  FieldName : HexFieldValue\n */\n\n");
@@ -460,7 +459,7 @@ DtCreateOneTemplate (
         AcpiOsPrintf (" (AML byte code table)\n");
         AcpiOsPrintf (" */\n");
 
-        if (ACPI_COMPARE_NAME (Signature, ACPI_SIG_DSDT))
+        if (ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_DSDT))
         {
             Actual = DtEmitDefinitionBlock (
                 File, DisasmFilename, ACPI_SIG_DSDT, 1);
@@ -483,7 +482,7 @@ DtCreateOneTemplate (
                 }
             }
         }
-        else if (ACPI_COMPARE_NAME (Signature, ACPI_SIG_SSDT))
+        else if (ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_SSDT))
         {
             Actual = DtEmitDefinitionBlock (
                 File, DisasmFilename, ACPI_SIG_SSDT, 1);
@@ -493,7 +492,7 @@ DtCreateOneTemplate (
                 goto Cleanup;
             }
         }
-        else if (ACPI_COMPARE_NAME (Signature, ACPI_SIG_OSDT))
+        else if (ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_OSDT))
         {
             Actual = DtEmitDefinitionBlock (
                 File, DisasmFilename, ACPI_SIG_OSDT, 1);
@@ -503,12 +502,12 @@ DtCreateOneTemplate (
                 goto Cleanup;
             }
         }
-        else if (ACPI_COMPARE_NAME (Signature, ACPI_SIG_FACS))
+        else if (ACPI_COMPARE_NAMESEG (Signature, ACPI_SIG_FACS))
         {
             AcpiDmDumpDataTable (ACPI_CAST_PTR (ACPI_TABLE_HEADER,
                 TemplateFacs));
         }
-        else if (ACPI_COMPARE_NAME (Signature, ACPI_RSDP_NAME))
+        else if (ACPI_COMPARE_NAMESEG (Signature, ACPI_RSDP_NAME))
         {
             AcpiDmDumpDataTable (ACPI_CAST_PTR (ACPI_TABLE_HEADER,
                 TemplateRsdp));

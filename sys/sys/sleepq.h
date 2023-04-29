@@ -1,4 +1,4 @@
-/*	$NetBSD: sleepq.h,v 1.24 2015/02/08 19:39:09 christos Exp $	*/
+/*	$NetBSD: sleepq.h,v 1.25 2018/04/19 21:19:07 christos Exp $	*/
 
 /*-
  * Copyright (c) 2002, 2006, 2007, 2008, 2009 The NetBSD Foundation, Inc.
@@ -48,7 +48,15 @@
 #define	SLEEPTAB_HASH_MASK	(SLEEPTAB_HASH_SIZE - 1)
 #define	SLEEPTAB_HASH(wchan)	(((uintptr_t)(wchan) >> 8) & SLEEPTAB_HASH_MASK)
 
+#ifdef _RUMPKERNEL
+# include <sys/condvar.h>
+struct sleepq {
+	TAILQ_HEAD(, lwp);	/* anonymous struct */
+	kcondvar_t sq_cv;
+};
+#else
 TAILQ_HEAD(sleepq, lwp);
+#endif
 
 typedef struct sleepq sleepq_t;
 
@@ -70,6 +78,16 @@ void	sleepq_changepri(lwp_t *, pri_t);
 void	sleepq_lendpri(lwp_t *, pri_t);
 int	sleepq_block(int, bool);
 
+#ifdef _RUMPKERNEL
+void
+sleepq_destroy(sleepq_t *);
+#else
+static inline void
+sleepq_destroy(sleepq_t *sq)
+{
+}
+#endif
+
 void	sleeptab_init(sleeptab_t *);
 
 extern sleeptab_t	sleeptab;
@@ -80,7 +98,7 @@ extern sleeptab_t	sleeptab;
  *
  * XXX This only exists because panic() is broken.
  */
-static inline bool
+static __inline bool
 sleepq_dontsleep(lwp_t *l)
 {
 	extern int cold;
@@ -92,7 +110,7 @@ sleepq_dontsleep(lwp_t *l)
  * Find the correct sleep queue for the specified wait channel.  This
  * acquires and holds the per-queue interlock.
  */
-static inline sleepq_t *
+static __inline sleepq_t *
 sleeptab_lookup(sleeptab_t *st, wchan_t wchan, kmutex_t **mp)
 {
 	sleepq_t *sq;
@@ -103,7 +121,7 @@ sleeptab_lookup(sleeptab_t *st, wchan_t wchan, kmutex_t **mp)
 	return sq;
 }
 
-static inline kmutex_t *
+static __inline kmutex_t *
 sleepq_hashlock(wchan_t wchan)
 {
 	kmutex_t *mp;
@@ -117,7 +135,7 @@ sleepq_hashlock(wchan_t wchan)
  * Prepare to block on a sleep queue, after which any interlock can be
  * safely released.
  */
-static inline void
+static __inline void
 sleepq_enter(sleepq_t *sq, lwp_t *l, kmutex_t *mp)
 {
 

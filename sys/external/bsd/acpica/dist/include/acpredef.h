@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2019, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -574,6 +574,9 @@ const ACPI_PREDEFINED_INFO          AcpiGbl_PredefinedMethods[] =
     {{"_HID",   METHOD_0ARGS,
                 METHOD_RETURNS (ACPI_RTYPE_INTEGER | ACPI_RTYPE_STRING)}},
 
+    {{"_HMA",   METHOD_0ARGS,
+                METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
+
     {{"_HOT",   METHOD_0ARGS,
                 METHOD_RETURNS (ACPI_RTYPE_INTEGER)}},
 
@@ -618,6 +621,17 @@ const ACPI_PREDEFINED_INFO          AcpiGbl_PredefinedMethods[] =
                     PACKAGE_INFO (ACPI_PTYPE2_VAR_VAR, ACPI_RTYPE_INTEGER, 3,
                     ACPI_RTYPE_INTEGER | ACPI_RTYPE_BUFFER | ACPI_RTYPE_STRING, 10,0),
 
+    {{"_LSI",   METHOD_0ARGS,
+                METHOD_RETURNS (ACPI_RTYPE_PACKAGE)}},
+                    PACKAGE_INFO (ACPI_PTYPE1_FIXED, ACPI_RTYPE_INTEGER, 3,0,0,0),
+
+    {{"_LSR",   METHOD_2ARGS (ACPI_TYPE_INTEGER, ACPI_TYPE_INTEGER),
+                METHOD_RETURNS (ACPI_RTYPE_PACKAGE)}},
+                    PACKAGE_INFO (ACPI_PTYPE1_FIXED, ACPI_RTYPE_INTEGER, 1, ACPI_RTYPE_BUFFER, 1,0),
+
+    {{"_LSW",   METHOD_3ARGS (ACPI_TYPE_INTEGER, ACPI_TYPE_INTEGER, ACPI_TYPE_BUFFER),
+                METHOD_RETURNS (ACPI_RTYPE_INTEGER)}},
+
     {{"_MAT",   METHOD_0ARGS,
                 METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
 
@@ -637,6 +651,21 @@ const ACPI_PREDEFINED_INFO          AcpiGbl_PredefinedMethods[] =
 
     {{"_MTL",   METHOD_0ARGS,                          /* ACPI 6.0 */
                 METHOD_RETURNS (ACPI_RTYPE_INTEGER)}},
+
+    {{"_NBS",   METHOD_0ARGS,                          /* ACPI 6.3 */
+                METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
+
+    {{"_NCH",   METHOD_0ARGS,                          /* ACPI 6.3 */
+                METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
+
+    {{"_NIC",   METHOD_0ARGS,                          /* ACPI 6.3 */
+                METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
+
+    {{"_NIG",   METHOD_1ARGS (ACPI_TYPE_BUFFER),       /* ACPI 6.3 */
+                METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
+
+    {{"_NIH",   METHOD_0ARGS,                          /* ACPI 6.3 */
+                METHOD_RETURNS (ACPI_RTYPE_BUFFER)}},
 
     {{"_NTT",   METHOD_0ARGS,
                 METHOD_RETURNS (ACPI_RTYPE_INTEGER)}},

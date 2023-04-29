@@ -31,7 +31,7 @@
 
 #include "opt_modular.h"
 
-__RCSID("$NetBSD: riscv_machdep.c,v 1.1 2015/03/28 16:13:56 matt Exp $");
+__RCSID("$NetBSD: riscv_machdep.c,v 1.4 2019/04/06 11:54:20 kamil Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -116,15 +116,13 @@ setregs(struct lwp *l, struct exec_package *pack, vaddr_t stack)
 }
 
 void
-child_return(void *arg)
+md_child_return(struct lwp *l)
 {
-	struct lwp * const l = arg;
 	struct trapframe * const tf = l->l_md.md_utf;
 
 	tf->tf_a0 = 0;
 	tf->tf_a1 = 1;
 	tf->tf_sr &= ~SR_EF;		/* Disable FP as we can't be them. */
-	ktrsysret(SYS_fork, 0, 0);
 }
 
 void
@@ -170,12 +168,12 @@ cpu_getmcontext(struct lwp *l, mcontext_t *mcp, unsigned int *flags)
 
 	/* Save floating point register context, if any. */
 	KASSERT(l == curlwp);
-	if (fpu_valid_p()) {
+	if (fpu_valid_p(l)) {
 		/*
 		 * If this process is the current FP owner, dump its
 		 * context to the PCB first.
 		 */
-		fpu_save();
+		fpu_save(l);
 
 		struct pcb * const pcb = lwp_getpcb(l);
 		*(struct fpreg *)mcp->__fregs = pcb->pcb_fpregs;
@@ -224,7 +222,7 @@ cpu_setmcontext(struct lwp *l, const mcontext_t *mcp, unsigned int flags)
 	if (flags & _UC_FPU) {
 		KASSERT(l == curlwp);
 		/* Tell PCU we are replacing the FPU contents. */
-		fpu_replace();
+		fpu_replace(l);
 
 		/*
 		 * The PCB FP regs struct includes the FP CSR, so use the

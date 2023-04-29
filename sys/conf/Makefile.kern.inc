@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile.kern.inc,v 1.250 2016/04/09 18:51:44 riastradh Exp $
+#	$NetBSD: Makefile.kern.inc,v 1.268 2019/02/05 08:33:25 mrg Exp $
 #
 # This file contains common `MI' targets and definitions and it is included
 # at the bottom of each `MD' ${MACHINE}/conf/Makefile.${MACHINE}.
@@ -63,7 +63,9 @@ S!=	cd ../../../.. && pwd
 INCLUDES?=	-I. ${EXTRA_INCLUDES} -I${S}/../common/include -I$S/arch \
 		-I$S -nostdinc
 CPPFLAGS+=	${INCLUDES} ${IDENT} -D_KERNEL -D_KERNEL_OPT
+.if !defined(COVERITY_TOP_CONFIG)
 CPPFLAGS+=	-std=gnu99
+.endif
 DEFCOPTS?=	-O2
 COPTS?=		${DEFCOPTS}
 DBG=		# might contain unwanted -Ofoo
@@ -87,7 +89,8 @@ CWARNFLAGS+=	-Wold-style-definition
 CWARNFLAGS+=	-Wno-sign-compare
 
 CWARNFLAGS.clang+=	-Wno-unknown-pragmas -Wno-conversion \
-			-Wno-self-assign
+			-Wno-self-assign -Wno-error=address-of-packed-member \
+			-Wno-error=constant-conversion
 
 CWARNFLAGS.ah_regdomain.c= ${${ACTIVE_CC} == "clang":? \
     -Wno-shift-count-negative -Wno-shift-count-overflow:}
@@ -95,6 +98,7 @@ CWARNFLAGS.ah_regdomain.c= ${${ACTIVE_CC} == "clang":? \
 CWARNFLAGS.ioconf.c= ${${ACTIVE_CC} == "clang":? -Wno-unused-const-variable :}
 
 CFLAGS+=	-ffreestanding -fno-zero-initialized-in-bss
+CFLAGS+=	${${ACTIVE_CC} == "gcc":? -fno-delete-null-pointer-checks :}
 CFLAGS+=	${DEBUG} ${COPTS}
 AFLAGS+=	-D_LOCORE -Wa,--fatal-warnings
 
@@ -151,10 +155,10 @@ LINK_O?=	@${_MKSHMSG} "   link  ${.CURDIR:T}/${.TARGET}" && \
 		${KLINK.o}
 
 ##
-## (3) libkern and compat
+## (3) libkern
 ##
-## Set KERN_AS in the port Makefile to "obj" or "library".  The
-## default is "library", as documented in $S/lib/libkern/Makefile.inc.
+## Set OPT_MODULAR in the port Makefile if module(7) is enabled,
+## as documented in $S/lib/libkern/Makefile.inc.
 ##
 
 ### find out what to use for libkern
@@ -166,16 +170,6 @@ LIBKERN?=	${KERNLIB_PROF}
 .endif
 
 LIBKERNLN?=	${KERNLIBLN}
-
-### find out what to use for libcompat
-.include "$S/compat/common/Makefile.inc"
-.ifndef PROF
-SYSLIBCOMPAT?=	${COMPATLIB}
-.else
-SYSLIBCOMPAT?=	${COMPATLIB_PROF}
-.endif
-
-SYSLIBCOMPATLN?=	${COMPATLIBLN}
 
 ##
 ## (4) local objects, compile rules, and dependencies
@@ -201,7 +195,7 @@ _MD_OBJS=	${MD_OBJS}
 # load lines for config "xxx" will be emitted as:
 # xxx: ${SYSTEM_DEP} swapxxxx.o vers.o build_kernel
 
-SYSTEM_LIB=	${MD_LIBS} ${SYSLIBCOMPAT} ${LIBKERN}
+SYSTEM_LIB=	${MD_LIBS} ${LIBKERN}
 SYSTEM_OBJ?=	${_MD_OBJS} ${OBJS} ${SYSTEM_LIB}
 SYSTEM_DEP+=	Makefile ${SYSTEM_OBJ:O}
 .if defined(CTFMERGE)
@@ -209,14 +203,20 @@ SYSTEM_CTFMERGE= ${CTFMERGE} ${CTFMFLAGS} -o ${.TARGET} ${SYSTEM_OBJ} ${EXTRA_OB
 .else
 SYSTEM_CTFMERGE= ${_MKSHECHO}
 .endif
+
+REMOVE_SWAP=   [@]
+.for k in ${KERNELS}
+REMOVE_SWAP:=  ${REMOVE_SWAP}:Nswap${k}.o
+.endfor
+
 SYSTEM_LD_HEAD?=@rm -f $@
 SYSTEM_LD?=	${_MKSHMSG} "   link  ${.CURDIR:T}/${.TARGET}"; \
 		${_MKSHECHO}\
 		${LD} -Map ${.TARGET}.map --cref ${LINKFLAGS} -o ${.TARGET} \
-		'$${SYSTEM_OBJ:N*swap*netbsd*}' '$${EXTRA_OBJ}' vers.o \
+		'$${SYSTEM_OBJ:${REMOVE_SWAP}}' '$${EXTRA_OBJ}' vers.o \
 		${OBJS:M*swap${.TARGET}.o}; \
 		${LD} -Map ${.TARGET}.map --cref ${LINKFLAGS} -o ${.TARGET} \
-		${SYSTEM_OBJ:N*swap*netbsd*} ${EXTRA_OBJ} vers.o \
+		${SYSTEM_OBJ:${REMOVE_SWAP}} ${EXTRA_OBJ} vers.o \
 		${OBJS:M*swap${.TARGET}.o}
 
 TEXTADDR?=	${LOADADDRESS}			# backwards compatibility
@@ -314,6 +314,10 @@ ${_s:T:R}.o: ${_s}
 .include "${S}/conf/cscope.mk"
 .include "${S}/conf/gdbinit.mk"
 .include "${S}/conf/ssp.mk"
+.if "${_SKIP_DTS}" != "yes"
+.include "${S}/conf/dts.mk"
+.endif
+.include "${S}/conf/copts.mk"
 
 ##
 ## (7) misc targets: install, clean(dir), depend(all), lint, links, tags,
@@ -425,6 +429,12 @@ AFLAGS+=	${AOPTS.${.IMPSRC:T}}
 CFLAGS+=	${COPTS.${.IMPSRC:T}} ${CPUFLAGS.${.IMPSRC:T}}
 CPPFLAGS+=	${CPPFLAGS.${.IMPSRC:T}}
 CWARNFLAGS+=	${CWARNFLAGS.${.IMPSRC:T}}
+
+.for _v in CFLAGS CPPFLAGS CWARNFLAGS
+.for _c in ${CSRCS}
+${_v}.${_c:T}+=${OPT.${_c:T}:@.o.@${${_v}.${.o.}}@}
+.endfor
+.endfor
 
 .MAIN: all
 all: .gdbinit

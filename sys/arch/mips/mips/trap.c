@@ -1,4 +1,4 @@
-/*	$NetBSD: trap.c,v 1.241 2016/07/11 18:54:32 skrll Exp $	*/
+/*	$NetBSD: trap.c,v 1.249 2019/04/06 11:54:20 kamil Exp $	*/
 
 /*
  * Copyright (c) 1988 University of Utah.
@@ -39,7 +39,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.241 2016/07/11 18:54:32 skrll Exp $");
+__KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.249 2019/04/06 11:54:20 kamil Exp $");
 
 #include "opt_cputype.h"	/* which mips CPU levels do we support? */
 #include "opt_ddb.h"
@@ -125,16 +125,14 @@ void ast(void);
  * which will be called the very first time when child gets running.
  */
 void
-child_return(void *arg)
+md_child_return(struct lwp *l)
 {
-	struct lwp *l = arg;
 	struct trapframe *utf = l->l_md.md_utf;
 
 	utf->tf_regs[_R_V0] = 0;
 	utf->tf_regs[_R_V1] = 1;
 	utf->tf_regs[_R_A3] = 0;
 	userret(l);
-	ktrsysret(SYS_fork, 0, 0);
 }
 
 #ifdef MIPS3_PLUS
@@ -323,11 +321,6 @@ trap(uint32_t status, uint32_t cause, vaddr_t vaddr, vaddr_t pc,
 		if (pcb->pcb_onfault == NULL) {
 			goto dopanic;
 		}
-		/* check for fuswintr() or suswintr() getting a page fault */
-		if (pcb->pcb_onfault == (void *)fswintrberr) {
-			tf->tf_regs[_R_PC] = (intptr_t)pcb->pcb_onfault;
-			return; /* KERN */
-		}
 		goto pagefault;
 	case T_TLB_LD_MISS+T_USER:
 		ftype = VM_PROT_READ;
@@ -391,11 +384,7 @@ trap(uint32_t status, uint32_t cause, vaddr_t vaddr, vaddr_t pc,
 
 		onfault = pcb->pcb_onfault;
 		pcb->pcb_onfault = NULL;
-		if (p->p_emul->e_fault) {
-			rv = (*p->p_emul->e_fault)(p, va, ftype);
-		} else {
-			rv = uvm_fault(map, va, ftype);
-		}
+		rv = uvm_fault(map, va, ftype);
 		pcb->pcb_onfault = onfault;
 
 #if defined(VMFAULT_TRACE)
@@ -433,21 +422,27 @@ trap(uint32_t status, uint32_t cause, vaddr_t vaddr, vaddr_t pc,
 		}
 		if ((type & T_USER) == 0)
 			goto copyfault;
-		if (rv == ENOMEM) {
-			printf("UVM: pid %d (%s), uid %d killed: out of swap\n",
-			       p->p_pid, p->p_comm,
-			       l->l_cred ?
-			       kauth_cred_geteuid(l->l_cred) : (uid_t) -1);
+
+		KSI_INIT_TRAP(&ksi);
+		switch (rv) {
+		case EINVAL:
+			ksi.ksi_signo = SIGBUS;
+			ksi.ksi_code = BUS_ADRERR;
+			break;
+		case EACCES:
+			ksi.ksi_signo = SIGSEGV;
+			ksi.ksi_code = SEGV_ACCERR;
+			break;
+		case ENOMEM:
 			ksi.ksi_signo = SIGKILL;
-			ksi.ksi_code = 0;
-		} else {
-			if (rv == EACCES) {
-				ksi.ksi_signo = SIGBUS;
-				ksi.ksi_code = BUS_OBJERR;
-			} else {
-				ksi.ksi_signo = SIGSEGV;
-				ksi.ksi_code = SEGV_MAPERR;
-			}
+			printf("UVM: pid %d.%d (%s), uid %d killed: "
+			    "out of swap\n", p->p_pid, l->l_lid, p->p_comm,
+			    l->l_cred ? kauth_cred_geteuid(l->l_cred) : -1);
+			break;
+		default:
+			ksi.ksi_signo = SIGSEGV;
+			ksi.ksi_code = SEGV_MAPERR;
+			break;
 		}
 		ksi.ksi_trap = type & ~T_USER;
 		ksi.ksi_addr = (void *)vaddr;
@@ -533,27 +528,31 @@ trap(uint32_t status, uint32_t cause, vaddr_t vaddr, vaddr_t pc,
 		vaddr_t va = pc + (cause & MIPS_CR_BR_DELAY ? sizeof(int) : 0);
 
 		/* read break instruction */
-		instr = ufetch_uint32((void *)va);
+		instr = mips_ufetch32((void *)va);
 
 		if (l->l_md.md_ss_addr != va || instr != MIPS_BREAK_SSTEP) {
 			ksi.ksi_trap = type & ~T_USER;
 			ksi.ksi_signo = SIGTRAP;
 			ksi.ksi_addr = (void *)va;
 			ksi.ksi_code = TRAP_TRACE;
+			/* we broke, skip it to avoid infinite loop */
+			if (instr == MIPS_BREAK_INSTR)
+				tf->tf_regs[_R_PC] += 4;
 			break;
 		}
 		/*
 		 * Restore original instruction and clear BP
 		 */
-		rv = ustore_uint32_isync((void *)va, l->l_md.md_ss_instr);
-		if (rv < 0) {
+		rv = mips_ustore32_isync((void *)va, l->l_md.md_ss_instr);
+		if (rv != 0) {
 			vaddr_t sa, ea;
 			sa = trunc_page(va);
 			ea = round_page(va + sizeof(int) - 1);
 			rv = uvm_map_protect(&p->p_vmspace->vm_map,
 				sa, ea, VM_PROT_ALL, false);
 			if (rv == 0) {
-				rv = ustore_uint32_isync((void *)va, l->l_md.md_ss_instr);
+				rv = mips_ustore32_isync((void *)va,
+				    l->l_md.md_ss_instr);
 				(void)uvm_map_protect(&p->p_vmspace->vm_map,
 				sa, ea, VM_PROT_READ|VM_PROT_EXECUTE, false);
 			}
@@ -561,7 +560,7 @@ trap(uint32_t status, uint32_t cause, vaddr_t vaddr, vaddr_t pc,
 		mips_icache_sync_all();		/* XXXJRT -- necessary? */
 		mips_dcache_wbinv_all();	/* XXXJRT -- necessary? */
 
-		if (rv < 0)
+		if (rv != 0)
 			printf("Warning: can't restore instruction"
 			    " at %#"PRIxVADDR": 0x%x\n",
 			    l->l_md.md_ss_addr, l->l_md.md_ss_instr);
@@ -698,7 +697,7 @@ mips_singlestep(struct lwp *l)
 		return EFAULT;
 	}
 	pc = (vaddr_t)tf->tf_regs[_R_PC];
-	if (ufetch_uint32((void *)pc) != 0) { /* not a NOP instruction */
+	if (mips_ufetch32((void *)pc) != 0) { /* not a NOP instruction */
 		struct pcb * const pcb = lwp_getpcb(l);
 		va = mips_emul_branch(tf, pc, PCB_FSR(pcb), true);
 	} else {
@@ -715,16 +714,17 @@ mips_singlestep(struct lwp *l)
 	}
 
 	l->l_md.md_ss_addr = va;
-	l->l_md.md_ss_instr = ufetch_uint32((void *)va);
-	rv = ustore_uint32_isync((void *)va, MIPS_BREAK_SSTEP);
-	if (rv < 0) {
+	l->l_md.md_ss_instr = mips_ufetch32((void *)va);
+	rv = mips_ustore32_isync((void *)va, MIPS_BREAK_SSTEP);
+	if (rv != 0) {
 		vaddr_t sa, ea;
 		sa = trunc_page(va);
 		ea = round_page(va + sizeof(int) - 1);
 		rv = uvm_map_protect(&p->p_vmspace->vm_map,
 		    sa, ea, VM_PROT_ALL, false);
 		if (rv == 0) {
-			rv = ustore_uint32_isync((void *)va, MIPS_BREAK_SSTEP);
+			rv = mips_ustore32_isync((void *)va,
+			    MIPS_BREAK_SSTEP);
 			(void)uvm_map_protect(&p->p_vmspace->vm_map,
 			    sa, ea, VM_PROT_READ|VM_PROT_EXECUTE, false);
 		}
@@ -732,7 +732,7 @@ mips_singlestep(struct lwp *l)
 #if 0
 	printf("SS %s (%d): breakpoint set at %x: %x (pc %x) br %x\n",
 		p->p_comm, p->p_pid, p->p_md.md_ss_addr,
-		p->p_md.md_ss_instr, pc, ufetch_uint32((void *)va)); /* XXX */
+		p->p_md.md_ss_instr, pc, mips_ufetch32((void *)va)); /* XXX */
 #endif
 	return 0;
 }
@@ -743,23 +743,20 @@ mips_singlestep(struct lwp *l)
 #if defined(DEBUG) || defined(DDB) || defined(KGDB) || defined(geo)
 mips_reg_t kdbrpeek(vaddr_t, size_t);
 
-int
-kdbpeek(vaddr_t addr)
+bool
+kdbpeek(vaddr_t addr, int *valp)
 {
-	int rc;
-
 	if (addr & 3) {
 		printf("kdbpeek: unaligned address %#"PRIxVADDR"\n", addr);
 		/* We might have been called from DDB, so do not go there. */
-		stacktrace();
-		rc = -1 ;
+		return false;
 	} else if (addr == 0) {
 		printf("kdbpeek: NULL\n");
-		rc = 0xdeadfeed;
+		return false;
 	} else {
-		rc = *(int *)addr;
+		*valp = *(int *)addr;
+		return true;
 	}
-	return rc;
 }
 
 mips_reg_t
@@ -904,7 +901,8 @@ loop:
 	sym = db_search_symbol(pc, DB_STGY_ANY, &diff);
 	if (sym != DB_SYM_NULL && diff == 0) {
 		/* check func(foo) __attribute__((__noreturn__)) case */
-		instr = kdbpeek(pc - 2 * sizeof(int));
+		if (!kdbpeek(pc - 2 * sizeof(int), &instr))
+			return;
 		i.word = instr;
 		if (i.JType.op == OP_JAL) {
 			sym = db_search_symbol(pc - sizeof(int),
@@ -932,7 +930,8 @@ loop:
 		va -= sizeof(int);
 		if (va <= (vaddr_t)verylocore)
 			goto finish;
-		instr = kdbpeek(va);
+		if (!kdbpeek(va, &instr))
+			return;
 		if (instr == MIPS_ERET)
 			goto mips3_eret;
 	} while (instr != MIPS_JR_RA && instr != MIPS_JR_K0);
@@ -941,8 +940,12 @@ loop:
 mips3_eret:
 	va += sizeof(int);
 	/* skip over nulls which might separate .o files */
-	while ((instr = kdbpeek(va)) == 0)
+	instr = 0;
+	while (instr == 0) {
+		if (!kdbpeek(va, &instr))
+			return;
 		va += sizeof(int);
+	}
 #endif
 	subr = va;
 
@@ -956,7 +959,8 @@ mips3_eret:
 		/* stop if hit our current position */
 		if (va >= pc)
 			break;
-		instr = kdbpeek(va);
+		if (!kdbpeek(va, &instr))
+			return;
 		i.word = instr;
 		switch (i.JType.op) {
 		case OP_SPECIAL:

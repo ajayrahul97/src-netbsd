@@ -1,4 +1,4 @@
-/*	$NetBSD: firewire.c,v 1.45 2014/10/18 08:33:28 snj Exp $	*/
+/*	$NetBSD: firewire.c,v 1.48.4.1 2020/01/31 11:14:51 martin Exp $	*/
 /*-
  * Copyright (c) 2003 Hidetoshi Shimokawa
  * Copyright (c) 1998-2002 Katsushi Kobayashi and Hidetoshi Shimokawa
@@ -37,7 +37,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: firewire.c,v 1.45 2014/10/18 08:33:28 snj Exp $");
+__KERNEL_RCSID(0, "$NetBSD: firewire.c,v 1.48.4.1 2020/01/31 11:14:51 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/bus.h>
@@ -622,32 +622,10 @@ fw_init(struct firewire_comm *fc)
 	mutex_init(&fc->atq->q_mtx, MUTEX_DEFAULT, IPL_VM);
 	mutex_init(&fc->ats->q_mtx, MUTEX_DEFAULT, IPL_VM);
 
-	for (i = 0; i < fc->nisodma; i++) {
-		fc->it[i]->queued = 0;
-		fc->ir[i]->queued = 0;
-
-		fc->it[i]->start = NULL;
-		fc->ir[i]->start = NULL;
-
-		fc->it[i]->buf = NULL;
-		fc->ir[i]->buf = NULL;
-
-		fc->it[i]->flag = FWXFERQ_STREAM;
-		fc->ir[i]->flag = FWXFERQ_STREAM;
-
-		STAILQ_INIT(&fc->it[i]->q);
-		STAILQ_INIT(&fc->ir[i]->q);
-	}
-
 	fc->arq->maxq = FWMAXQUEUE;
 	fc->ars->maxq = FWMAXQUEUE;
 	fc->atq->maxq = FWMAXQUEUE;
 	fc->ats->maxq = FWMAXQUEUE;
-
-	for (i = 0; i < fc->nisodma; i++) {
-		fc->ir[i]->maxq = FWMAXQUEUE;
-		fc->it[i]->maxq = FWMAXQUEUE;
-	}
 
 	CSRARC(fc, TOPO_MAP) = 0x3f1 << 16;
 	CSRARC(fc, TOPO_MAP + 4) = 1;
@@ -675,6 +653,50 @@ fw_init(struct firewire_comm *fc)
 #endif
 
 	fc->crom_src_buf = NULL;
+}
+
+/*
+ * Called by HCI driver when it has determined the number of
+ * isochronous DMA channels.
+ */
+void
+fw_init_isodma(struct firewire_comm *fc)
+{
+	unsigned i;
+
+	for (i = 0; i < fc->nisodma; i++) {
+		fc->it[i]->queued = 0;
+		fc->ir[i]->queued = 0;
+
+		fc->it[i]->start = NULL;
+		fc->ir[i]->start = NULL;
+
+		fc->it[i]->buf = NULL;
+		fc->ir[i]->buf = NULL;
+
+		fc->it[i]->flag = FWXFERQ_STREAM;
+		fc->ir[i]->flag = FWXFERQ_STREAM;
+
+		STAILQ_INIT(&fc->it[i]->q);
+		STAILQ_INIT(&fc->ir[i]->q);
+
+		fc->ir[i]->maxq = FWMAXQUEUE;
+		fc->it[i]->maxq = FWMAXQUEUE;
+
+		cv_init(&fc->ir[i]->cv, "fw_read");
+		cv_init(&fc->it[i]->cv, "fw_write");
+	}
+}
+
+void
+fw_destroy_isodma(struct firewire_comm *fc)
+{
+	unsigned i;
+
+	for (i = 0; i < fc->nisodma; i++) {
+		cv_destroy(&fc->ir[i]->cv);
+		cv_destroy(&fc->it[i]->cv);
+	}
 }
 
 void
@@ -994,7 +1016,7 @@ fw_sidrcv(struct firewire_comm* fc, uint32_t *sid, u_int len)
 			for (j = 0; j < node; j++)
 				fc->speed_map->speed[j][node] =
 				    fc->speed_map->speed[node][j] =
-				    min(fc->speed_map->speed[j][j],
+				    uimin(fc->speed_map->speed[j][j],
 							self_id->p0.phy_speed);
 			if ((fc->irm == -1 || self_id->p0.phy_id > fc->irm) &&
 			    (self_id->p0.link_active && self_id->p0.contender))
@@ -1385,12 +1407,12 @@ fw_reset_csr(struct firewire_comm *fc)
 	CSRARC(fc, BANDWIDTH_AV) = 4915;
 	CSRARC(fc, CHANNELS_AV_HI) = 0xffffffff;
 	CSRARC(fc, CHANNELS_AV_LO) = 0xffffffff;
-	CSRARC(fc, IP_CHANNELS) = (1 << 31);
+	CSRARC(fc, IP_CHANNELS) = (1U << 31);
 
 	CSRARC(fc, CONF_ROM) = 0x04 << 24;
 	CSRARC(fc, CONF_ROM + 4) = 0x31333934; /* means strings 1394 */
 	CSRARC(fc, CONF_ROM + 8) =
-	    1 << 31 | 1 << 30 | 1 << 29 | 1 << 28 | 0xff << 16 | 0x09 << 8;
+	    1U << 31 | 1 << 30 | 1 << 29 | 1 << 28 | 0xff << 16 | 0x09 << 8;
 	CSRARC(fc, CONF_ROM + 0xc) = 0;
 
 /* DV depend CSRs see blue book */

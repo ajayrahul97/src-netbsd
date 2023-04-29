@@ -1,4 +1,4 @@
-/*	$NetBSD: kern_fork.c,v 1.195 2016/01/09 07:52:38 dholland Exp $	*/
+/*	$NetBSD: kern_fork.c,v 1.213.2.1 2019/10/15 18:32:13 martin Exp $	*/
 
 /*-
  * Copyright (c) 1999, 2001, 2004, 2006, 2007, 2008 The NetBSD Foundation, Inc.
@@ -67,7 +67,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: kern_fork.c,v 1.195 2016/01/09 07:52:38 dholland Exp $");
+__KERNEL_RCSID(0, "$NetBSD: kern_fork.c,v 1.213.2.1 2019/10/15 18:32:13 martin Exp $");
 
 #include "opt_ktrace.h"
 #include "opt_dtrace.h"
@@ -87,6 +87,7 @@ __KERNEL_RCSID(0, "$NetBSD: kern_fork.c,v 1.195 2016/01/09 07:52:38 dholland Exp
 #include <sys/ktrace.h>
 #include <sys/sched.h>
 #include <sys/signalvar.h>
+#include <sys/syscall.h>
 #include <sys/kauth.h>
 #include <sys/atomic.h>
 #include <sys/syscallargs.h>
@@ -117,7 +118,7 @@ int
 sys_fork(struct lwp *l, const void *v, register_t *retval)
 {
 
-	return fork1(l, 0, SIGCHLD, NULL, 0, NULL, NULL, retval, NULL);
+	return fork1(l, 0, SIGCHLD, NULL, 0, NULL, NULL, retval);
 }
 
 /*
@@ -129,7 +130,7 @@ sys_vfork(struct lwp *l, const void *v, register_t *retval)
 {
 
 	return fork1(l, FORK_PPWAIT, SIGCHLD, NULL, 0, NULL, NULL,
-	    retval, NULL);
+	    retval);
 }
 
 /*
@@ -141,7 +142,7 @@ sys___vfork14(struct lwp *l, const void *v, register_t *retval)
 {
 
 	return fork1(l, FORK_PPWAIT|FORK_SHAREVM, SIGCHLD, NULL, 0,
-	    NULL, NULL, retval, NULL);
+	    NULL, NULL, retval);
 }
 
 /*
@@ -194,7 +195,7 @@ sys___clone(struct lwp *l, const struct sys___clone_args *uap,
 	 * code that makes this adjustment is a noop.
 	 */
 	return fork1(l, flags, sig, SCARG(uap, stack), 0,
-	    NULL, NULL, retval, NULL);
+	    NULL, NULL, retval);
 }
 
 /*
@@ -203,14 +204,46 @@ sys___clone(struct lwp *l, const struct sys___clone_args *uap,
 static struct timeval fork_tfmrate = { 10, 0 };
 
 /*
+ * Check if a process is traced and shall inform about FORK events.
+ */
+static inline bool
+tracefork(struct proc *p, int flags)
+{
+
+	return (p->p_slflag & (PSL_TRACEFORK|PSL_TRACED)) ==
+	    (PSL_TRACEFORK|PSL_TRACED) && (flags & FORK_PPWAIT) == 0;
+}
+
+/*
+ * Check if a process is traced and shall inform about VFORK events.
+ */
+static inline bool
+tracevfork(struct proc *p, int flags)
+{
+
+	return (p->p_slflag & (PSL_TRACEVFORK|PSL_TRACED)) ==
+	    (PSL_TRACEVFORK|PSL_TRACED) && (flags & FORK_PPWAIT) != 0;
+}
+
+/*
+ * Check if a process is traced and shall inform about VFORK_DONE events.
+ */
+static inline bool
+tracevforkdone(struct proc *p, int flags)
+{
+
+	return (p->p_slflag & (PSL_TRACEVFORK_DONE|PSL_TRACED)) ==
+	    (PSL_TRACEVFORK_DONE|PSL_TRACED) && (flags & FORK_PPWAIT);
+}
+
+/*
  * General fork call.  Note that another LWP in the process may call exec()
  * or exit() while we are forking.  It's safe to continue here, because
  * neither operation will complete until all LWPs have exited the process.
  */
 int
 fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
-    void (*func)(void *), void *arg, register_t *retval,
-    struct proc **rnewprocp)
+    void (*func)(void *), void *arg, register_t *retval)
 {
 	struct proc	*p1, *p2, *parent;
 	struct plimit   *p1_lim;
@@ -219,7 +252,6 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 	int		count;
 	vaddr_t		uaddr;
 	int		tnprocs;
-	int		tracefork;
 	int		error = 0;
 
 	p1 = l1->l_proc;
@@ -346,6 +378,10 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 	p2->p_textvp = p1->p_textvp;
 	if (p2->p_textvp)
 		vref(p2->p_textvp);
+	if (p1->p_path)
+		p2->p_path = kmem_strdupsize(p1->p_path, NULL, KM_SLEEP);
+	else
+		p2->p_path = NULL;
 
 	if (flags & FORK_SHAREFILES)
 		fd_share(p2);
@@ -376,11 +412,12 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 
 	if (flags & FORK_PPWAIT) {
 		/* Mark ourselves as waiting for a child. */
-		l1->l_pflag |= LP_VFORKWAIT;
 		p2->p_lflag = PL_PPWAIT;
+		l1->l_vforkwaiting = true;
 		p2->p_vforklwp = l1;
 	} else {
 		p2->p_lflag = 0;
+		l1->l_vforkwaiting = false;
 	}
 	p2->p_sflag = 0;
 	p2->p_slflag = 0;
@@ -434,7 +471,7 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 	 */
 	lwp_create(l1, p2, uaddr, (flags & FORK_PPWAIT) ? LWP_VFORK : 0,
 	    stack, stacksize, (func != NULL) ? func : child_return, arg, &l2,
-	    l1->l_class);
+	    l1->l_class, &l1->l_sigmask, &l1->l_sigstk);
 
 	/*
 	 * Inherit l_private from the parent.
@@ -471,37 +508,10 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 	p2->p_exitsig = exitsig;		/* signal for parent on exit */
 
 	/*
-	 * We don't want to tracefork vfork()ed processes because they
-	 * will not receive the SIGTRAP until it is too late.
+	 * Trace fork(2) and vfork(2)-like events on demand in a debugger.
 	 */
-	tracefork = (p1->p_slflag & (PSL_TRACEFORK|PSL_TRACED)) ==
-	    (PSL_TRACEFORK|PSL_TRACED) && (flags && FORK_PPWAIT) == 0;
-	if (tracefork) {
-		p2->p_slflag |= PSL_TRACED;
-		p2->p_opptr = p2->p_pptr;
-		if (p2->p_pptr != p1->p_pptr) {
-			struct proc *parent1 = p2->p_pptr;
-
-			if (parent1->p_lock < p2->p_lock) {
-				if (!mutex_tryenter(parent1->p_lock)) {
-					mutex_exit(p2->p_lock);
-					mutex_enter(parent1->p_lock);
-					mutex_enter(p2->p_lock);
-				}
-			} else if (parent1->p_lock > p2->p_lock) {
-				mutex_enter(parent1->p_lock);
-			}
-			parent1->p_slflag |= PSL_CHTRACED;
-			proc_reparent(p2, p1->p_pptr);
-			if (parent1->p_lock != p2->p_lock)
-				mutex_exit(parent1->p_lock);
-		}
-
-		/*
-		 * Set ptrace status.
-		 */
-		p1->p_fpid = p2->p_pid;
-		p2->p_fpid = p1->p_pid;
+	if (tracefork(p1, flags) || tracevfork(p1, flags)) {
+		proc_changeparent(p2, p1->p_pptr);
 	}
 
 	LIST_INSERT_AFTER(p1, p2, p_pglist);
@@ -520,12 +530,6 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 		uvmexp.forks_ppwait++;
 	if (flags & FORK_SHAREVM)
 		uvmexp.forks_sharevm++;
-
-	/*
-	 * Pass a pointer to the new process to the caller.
-	 */
-	if (rnewprocp != NULL)
-		*rnewprocp = p2;
 
 	if (ktrpoint(KTR_EMUL))
 		p2->p_traceflag |= KTRFAC_TRC_EMUL;
@@ -583,33 +587,68 @@ fork1(struct lwp *l1, int flags, int exitsig, void *stack, size_t stacksize,
 		retval[0] = p2->p_pid;
 		retval[1] = 0;
 	}
-	mutex_exit(p2->p_lock);
 
-	/*
-	 * Preserve synchronization semantics of vfork.  If waiting for
-	 * child to exec or exit, sleep until it clears LP_VFORKWAIT.
-	 */
-#if 0
-	while (l1->l_pflag & LP_VFORKWAIT) {
-		cv_wait(&l1->l_waitcv, proc_lock);
-	}
-#else
-	while (p2->p_lflag & PL_PPWAIT)
-		cv_wait(&p1->p_waitcv, proc_lock);
-#endif
+	mutex_exit(p2->p_lock);
 
 	/*
 	 * Let the parent know that we are tracing its child.
 	 */
-	if (tracefork) {
-		ksiginfo_t ksi;
-
-		KSI_INIT_EMPTY(&ksi);
-		ksi.ksi_signo = SIGTRAP;
-		ksi.ksi_lid = l1->l_lid;
-		kpsignal(p1, &ksi, NULL);
+	if (tracefork(p1, flags) || tracevfork(p1, flags)) {
+		mutex_enter(p1->p_lock);
+		eventswitch(TRAP_CHLD,
+		    tracefork(p1, flags) ? PTRACE_FORK : PTRACE_VFORK,
+		    retval[0]);
+		mutex_enter(proc_lock);
 	}
-	mutex_exit(proc_lock);
+
+	/*
+	 * Preserve synchronization semantics of vfork.  If waiting for
+	 * child to exec or exit, sleep until it clears p_vforkwaiting.
+	 */
+	while (l1->l_vforkwaiting)
+		cv_wait(&l1->l_waitcv, proc_lock);
+
+	/*
+	 * Let the parent know that we are tracing its child.
+	 */
+	if (tracevforkdone(p1, flags)) {
+		mutex_enter(p1->p_lock);
+		eventswitch(TRAP_CHLD, PTRACE_VFORK_DONE, retval[0]);
+	} else
+		mutex_exit(proc_lock);
 
 	return 0;
+}
+
+/*
+ * MI code executed in each newly spawned process before returning to userland.
+ */
+void
+child_return(void *arg)
+{
+	struct lwp *l = arg;
+	struct proc *p = l->l_proc;
+
+	if (p->p_slflag & PSL_TRACED) {
+		/* Paranoid check */
+		mutex_enter(proc_lock);
+		if (!(p->p_slflag & PSL_TRACED)) {
+			mutex_exit(proc_lock);
+			goto my_tracer_is_gone;
+		}
+		mutex_enter(p->p_lock);
+		eventswitch(TRAP_CHLD,
+		    ISSET(p->p_lflag, PL_PPWAIT) ? PTRACE_VFORK : PTRACE_FORK,
+		    p->p_opptr->p_pid);
+	}
+
+my_tracer_is_gone:
+	md_child_return(l);
+
+	/*
+	 * Return SYS_fork for all fork types, including vfork(2) and clone(2).
+	 *
+	 * This approach simplifies the code and avoids extra locking.
+	 */
+	ktrsysret(SYS_fork, 0, 0);
 }

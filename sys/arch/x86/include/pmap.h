@@ -1,4 +1,4 @@
-/*	$NetBSD: pmap.h,v 1.59 2016/07/25 12:11:40 maxv Exp $	*/
+/*	$NetBSD: pmap.h,v 1.101 2019/05/29 16:54:41 maxv Exp $	*/
 
 /*
  * Copyright (c) 1997 Charles D. Cranor and Washington University.
@@ -75,6 +75,8 @@
 #define pl2_pi(VA)	(((VA_SIGN_POS(VA)) & L2_MASK) >> L2_SHIFT)
 #define pl3_pi(VA)	(((VA_SIGN_POS(VA)) & L3_MASK) >> L3_SHIFT)
 #define pl4_pi(VA)	(((VA_SIGN_POS(VA)) & L4_MASK) >> L4_SHIFT)
+#define pl_pi(va, lvl) \
+        (((VA_SIGN_POS(va)) & ptp_masks[(lvl)-1]) >> ptp_shifts[(lvl)-1])
 
 /*
  * pl*_i: generate index into pde/pte arrays in virtual space
@@ -86,9 +88,9 @@
 #define pl3_i(VA)	(((VA_SIGN_POS(VA)) & L3_FRAME) >> L3_SHIFT)
 #define pl4_i(VA)	(((VA_SIGN_POS(VA)) & L4_FRAME) >> L4_SHIFT)
 #define pl_i(va, lvl) \
-        (((VA_SIGN_POS(va)) & ptp_masks[(lvl)-1]) >> ptp_shifts[(lvl)-1])
+        (((VA_SIGN_POS(va)) & ptp_frames[(lvl)-1]) >> ptp_shifts[(lvl)-1])
 
-#define	pl_i_roundup(va, lvl)	pl_i((va)+ ~ptp_masks[(lvl)-1], (lvl))
+#define	pl_i_roundup(va, lvl)	pl_i((va)+ ~ptp_frames[(lvl)-1], (lvl))
 
 /*
  * PTP macros:
@@ -109,7 +111,107 @@
 
 #if defined(_KERNEL)
 #include <sys/kcpuset.h>
+#include <x86/pmap_pv.h>
 #include <uvm/pmap/pmap_pvt.h>
+
+#define	PATENTRY(n, type)	(type << ((n) * 8))
+#define	PAT_UC		0x0ULL
+#define	PAT_WC		0x1ULL
+#define	PAT_WT		0x4ULL
+#define	PAT_WP		0x5ULL
+#define	PAT_WB		0x6ULL
+#define	PAT_UCMINUS	0x7ULL
+
+#define BTSEG_NONE	0
+#define BTSEG_TEXT	1
+#define BTSEG_RODATA	2
+#define BTSEG_DATA	3
+#define BTSPACE_NSEGS	64
+
+struct bootspace {
+	struct {
+		vaddr_t va;
+		paddr_t pa;
+		size_t sz;
+	} head;
+
+	/* Kernel segments. */
+	struct {
+		int type;
+		vaddr_t va;
+		paddr_t pa;
+		size_t sz;
+	} segs[BTSPACE_NSEGS];
+
+	/*
+	 * The area used by the early kernel bootstrap. It contains the kernel
+	 * symbols, the preloaded modules, the bootstrap tables, and the ISA I/O
+	 * mem.
+	 */
+	struct {
+		vaddr_t va;
+		paddr_t pa;
+		size_t sz;
+	} boot;
+
+	/* A magic VA usable by the bootstrap code. */
+	vaddr_t spareva;
+
+	/* Virtual address of the page directory. */
+	vaddr_t pdir;
+
+	/* Area dedicated to kernel modules (amd64 only). */
+	vaddr_t smodule;
+	vaddr_t emodule;
+};
+
+#define SLAREA_USER	0
+#define SLAREA_PTE	1
+#define SLAREA_MAIN	2
+#define SLAREA_PCPU	3
+#define SLAREA_DMAP	4
+#define SLAREA_HYPV	5
+#define SLAREA_ASAN	6
+#define SLAREA_KERN	7
+#define SLSPACE_NAREAS	8
+
+struct slotspace {
+	struct {
+		size_t sslot; /* start slot */
+		size_t nslot; /* # of slots */
+		bool active;  /* area is active */
+	} area[SLSPACE_NAREAS];
+};
+
+extern struct slotspace slotspace;
+
+#ifndef MAXGDTSIZ
+#define MAXGDTSIZ 65536 /* XXX */
+#endif
+
+struct pcpu_entry {
+	uint8_t gdt[MAXGDTSIZ];
+	uint8_t tss[PAGE_SIZE];
+	uint8_t ist0[PAGE_SIZE];
+	uint8_t ist1[PAGE_SIZE];
+	uint8_t ist2[PAGE_SIZE];
+	uint8_t ist3[PAGE_SIZE];
+	uint8_t rsp0[2 * PAGE_SIZE];
+} __packed;
+
+struct pcpu_area {
+#ifdef SVS
+	uint8_t utls[PAGE_SIZE];
+#endif
+	uint8_t idt[PAGE_SIZE];
+	uint8_t ldt[PAGE_SIZE];
+	struct pcpu_entry ent[MAXCPUS];
+} __packed;
+
+extern struct pcpu_area *pcpuarea;
+
+#define PMAP_PCID_KERN	0
+#define PMAP_PCID_USER	1
 
 /*
  * pmap data structures: see pmap.c for details of locking.
@@ -169,6 +271,20 @@ struct pmap {
 					 ptp mapped */
 	uint64_t pm_ncsw;		/* for assertions */
 	struct vm_page *pm_gc_ptp;	/* pages from pmap g/c */
+
+	/* Used by NVMM. */
+	int (*pm_enter)(struct pmap *, vaddr_t, paddr_t, vm_prot_t, u_int);
+	bool (*pm_extract)(struct pmap *, vaddr_t, paddr_t *);
+	void (*pm_remove)(struct pmap *, vaddr_t, vaddr_t);
+	int (*pm_sync_pv)(struct vm_page *, vaddr_t, paddr_t, int, uint8_t *,
+	    pt_entry_t *);
+	void (*pm_pp_remove_ent)(struct pmap *, struct vm_page *, pt_entry_t,
+	    vaddr_t);
+	void (*pm_write_protect)(struct pmap *, vaddr_t, vaddr_t, vm_prot_t);
+	void (*pm_unwire)(struct pmap *, vaddr_t);
+
+	void (*pm_tlb_flush)(struct pmap *);
+	void *pm_data;
 };
 
 /* macro to access pm_pdirpa slots */
@@ -178,16 +294,6 @@ struct pmap {
 #else
 #define pmap_pdirpa(pmap, index) \
 	((pmap)->pm_pdirpa[0] + (index) * sizeof(pd_entry_t))
-#endif
-
-/* 
- * flag to be used for kernel mappings: PG_u on Xen/amd64, 
- * 0 otherwise.
- */
-#if defined(XEN) && defined(__x86_64__)
-#define PG_k PG_u
-#else
-#define PG_k 0
 #endif
 
 /*
@@ -210,6 +316,7 @@ extern u_long PDPpaddr;
 
 extern pd_entry_t pmap_pg_g;			/* do we support PG_G? */
 extern pd_entry_t pmap_pg_nx;			/* do we support PG_NX? */
+extern int pmap_largepages;
 extern long nkptp[PTP_LEVELS];
 
 /*
@@ -219,15 +326,15 @@ extern long nkptp[PTP_LEVELS];
 #define	pmap_resident_count(pmap)	((pmap)->pm_stats.resident_count)
 #define	pmap_wired_count(pmap)		((pmap)->pm_stats.wired_count)
 
-#define pmap_clear_modify(pg)		pmap_clear_attrs(pg, PG_M)
-#define pmap_clear_reference(pg)	pmap_clear_attrs(pg, PG_U)
+#define pmap_clear_modify(pg)		pmap_clear_attrs(pg, PP_ATTRS_M)
+#define pmap_clear_reference(pg)	pmap_clear_attrs(pg, PP_ATTRS_U)
 #define pmap_copy(DP,SP,D,L,S)		__USE(L)
-#define pmap_is_modified(pg)		pmap_test_attrs(pg, PG_M)
-#define pmap_is_referenced(pg)		pmap_test_attrs(pg, PG_U)
+#define pmap_is_modified(pg)		pmap_test_attrs(pg, PP_ATTRS_M)
+#define pmap_is_referenced(pg)		pmap_test_attrs(pg, PP_ATTRS_U)
 #define pmap_move(DP,SP,D,L,S)
 #define pmap_phys_address(ppn)		(x86_ptob(ppn) & ~X86_MMAP_FLAG_MASK)
 #define pmap_mmap_flags(ppn)		x86_mmap_flags(ppn)
-#define pmap_valid_entry(E) 		((E) & PG_V) /* is PDE or PTE valid? */
+#define pmap_valid_entry(E) 		((E) & PTE_P) /* is PDE or PTE valid? */
 
 #if defined(__x86_64__) || defined(PAE)
 #define X86_MMAP_FLAG_SHIFT	(64 - PGSHIFT)
@@ -255,12 +362,9 @@ void		pmap_write_protect(struct pmap *, vaddr_t, vaddr_t, vm_prot_t);
 void		pmap_load(void);
 paddr_t		pmap_init_tmp_pgtbl(paddr_t);
 void		pmap_remove_all(struct pmap *);
+void		pmap_ldt_cleanup(struct lwp *);
 void		pmap_ldt_sync(struct pmap *);
 void		pmap_kremove_local(vaddr_t, vsize_t);
-
-void		pmap_emap_enter(vaddr_t, paddr_t, vm_prot_t);
-void		pmap_emap_remove(vaddr_t, vsize_t);
-void		pmap_emap_sync(bool);
 
 #define	__HAVE_PMAP_PV_TRACK	1
 void		pmap_pv_init(void);
@@ -271,11 +375,19 @@ void		pmap_map_ptes(struct pmap *, struct pmap **, pd_entry_t **,
 		    pd_entry_t * const **);
 void		pmap_unmap_ptes(struct pmap *, struct pmap *);
 
-int		pmap_pdes_invalid(vaddr_t, pd_entry_t * const *, pd_entry_t *);
+bool		pmap_pdes_valid(vaddr_t, pd_entry_t * const *, pd_entry_t *,
+		    int *lastlvl);
 
 u_int		x86_mmap_flags(paddr_t);
 
 bool		pmap_is_curpmap(struct pmap *);
+
+void		pmap_ept_transform(struct pmap *);
+
+#ifndef __HAVE_DIRECT_MAP
+void		pmap_vpage_cpu_init(struct cpu_info *);
+#endif
+vaddr_t		slotspace_rand(int, size_t, size_t);
 
 vaddr_t reserve_dumppages(vaddr_t); /* XXX: not a pmap fn */
 
@@ -303,8 +415,6 @@ void		pmap_tlb_shootdown(pmap_t, vaddr_t, pt_entry_t, tlbwhy_t);
 void		pmap_tlb_shootnow(void);
 void		pmap_tlb_intr(void);
 
-#define	__HAVE_PMAP_EMAP
-
 #define PMAP_GROWKERNEL		/* turn on pmap_growkernel interface */
 #define PMAP_FORK		/* turn on pmap_fork interface */
 
@@ -318,12 +428,6 @@ bool	pmap_pageidlezero(paddr_t);
  * inline functions
  */
 
-__inline static bool __unused
-pmap_pdes_valid(vaddr_t va, pd_entry_t * const *pdes, pd_entry_t *lastpde)
-{
-	return pmap_pdes_invalid(va, pdes, lastpde) == 0;
-}
-
 /*
  * pmap_update_pg: flush one page from the TLB (or flush the whole thing
  *	if hardware doesn't support one-page flushing)
@@ -333,17 +437,6 @@ __inline static void __unused
 pmap_update_pg(vaddr_t va)
 {
 	invlpg(va);
-}
-
-/*
- * pmap_update_2pg: flush two pages from the TLB
- */
-
-__inline static void __unused
-pmap_update_2pg(vaddr_t va, vaddr_t vb)
-{
-	invlpg(va);
-	invlpg(vb);
 }
 
 /*
@@ -360,7 +453,7 @@ pmap_page_protect(struct vm_page *pg, vm_prot_t prot)
 {
 	if ((prot & VM_PROT_WRITE) == 0) {
 		if (prot & (VM_PROT_READ|VM_PROT_EXECUTE)) {
-			(void) pmap_clear_attrs(pg, PG_RW);
+			(void)pmap_clear_attrs(pg, PP_ATTRS_W);
 		} else {
 			pmap_page_remove(pg);
 		}
@@ -377,7 +470,7 @@ pmap_pv_protect(paddr_t pa, vm_prot_t prot)
 {
 	if ((prot & VM_PROT_WRITE) == 0) {
 		if (prot & (VM_PROT_READ|VM_PROT_EXECUTE)) {
-			(void) pmap_pv_clear_attrs(pa, PG_RW);
+			(void)pmap_pv_clear_attrs(pa, PP_ATTRS_W);
 		} else {
 			pmap_pv_remove(pa);
 		}
@@ -443,7 +536,7 @@ vaddr_t	pmap_map(vaddr_t, paddr_t, paddr_t, vm_prot_t);
 void	pmap_cpu_init_late(struct cpu_info *);
 bool	sse2_idlezero_page(void *);
 
-#ifdef XEN
+#ifdef XENPV
 #include <sys/bitops.h>
 
 #define XPTE_MASK	L1_FRAME
@@ -474,26 +567,35 @@ xpmap_ptetomach(pt_entry_t *pte)
 
 paddr_t	vtomach(vaddr_t);
 #define vtomfn(va) (vtomach(va) >> PAGE_SHIFT)
-#endif	/* XEN */
+#endif	/* XENPV */
 
 /* pmap functions with machine addresses */
 void	pmap_kenter_ma(vaddr_t, paddr_t, vm_prot_t, u_int);
 int	pmap_enter_ma(struct pmap *, vaddr_t, paddr_t, paddr_t,
 	    vm_prot_t, u_int, int);
 bool	pmap_extract_ma(pmap_t, vaddr_t, paddr_t *);
+void	pmap_free_ptps(struct vm_page *);
+
+paddr_t pmap_get_physpage(void);
 
 /*
  * Hooks for the pool allocator.
  */
 #define	POOL_VTOPHYS(va)	vtophys((vaddr_t) (va))
 
+#ifdef __HAVE_PCPU_AREA
+extern struct pcpu_area *pcpuarea;
+#define PDIR_SLOT_PCPU		510
+#define PMAP_PCPU_BASE		(VA_SIGN_NEG((PDIR_SLOT_PCPU * NBPD_L4)))
+#endif
+
 #ifdef __HAVE_DIRECT_MAP
 
-#define L4_SLOT_DIRECT		509
-#define PDIR_SLOT_DIRECT	L4_SLOT_DIRECT
+extern vaddr_t pmap_direct_base;
+extern vaddr_t pmap_direct_end;
 
-#define PMAP_DIRECT_BASE	(VA_SIGN_NEG((L4_SLOT_DIRECT * NBPD_L4)))
-#define PMAP_DIRECT_END		(VA_SIGN_NEG(((L4_SLOT_DIRECT + 1) * NBPD_L4)))
+#define PMAP_DIRECT_BASE	pmap_direct_base
+#define PMAP_DIRECT_END		pmap_direct_end
 
 #define PMAP_DIRECT_MAP(pa)	((vaddr_t)PMAP_DIRECT_BASE + (pa))
 #define PMAP_DIRECT_UNMAP(va)	((paddr_t)(va) - PMAP_DIRECT_BASE)

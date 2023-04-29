@@ -1,4 +1,4 @@
-/*	$NetBSD: machdep.c,v 1.327 2014/09/21 16:36:32 christos Exp $ */
+/*	$NetBSD: machdep.c,v 1.330 2019/04/06 03:06:27 thorpej Exp $ */
 
 /*-
  * Copyright (c) 1996, 1997, 1998 The NetBSD Foundation, Inc.
@@ -71,7 +71,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.327 2014/09/21 16:36:32 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: machdep.c,v 1.330 2019/04/06 03:06:27 thorpej Exp $");
 
 #include "opt_compat_netbsd.h"
 #include "opt_compat_sunos.h"
@@ -542,7 +542,7 @@ sendsig_siginfo(const ksiginfo_t *ksi, const sigset_t *mask)
 	ucsz = (int)&uc.__uc_pad - (int)&uc;
 	error = (copyout(&ksi->ksi_info, &fp->sf_si, sizeof ksi->ksi_info) ||
 	    copyout(&uc, &fp->sf_uc, ucsz) ||
-	    suword(&((struct rwindow *)newsp)->rw_in[6], oldsp));
+	    ustore_int((u_int *)&((struct rwindow *)newsp)->rw_in[6], oldsp));
 	mutex_enter(p->p_lock);
 
 	if (error) {
@@ -943,6 +943,7 @@ cpu_dumpconf(void)
 
 #define	BYTES_PER_DUMP	(32 * 1024)	/* must be a multiple of pagesize */
 static vaddr_t dumpspace;
+struct pcb dumppcb;
 
 void *
 reserve_dumppages(void *p)
@@ -970,6 +971,7 @@ dumpsys(void)
 
 	/* copy registers to memory */
 	snapshot(cpuinfo.curpcb);
+	memcpy(&dumppcb, cpuinfo.curpcb, sizeof dumppcb);
 	stackdump();
 
 	if (dumpdev == NODEV)
@@ -3141,10 +3143,7 @@ mm_md_readwrite(dev_t dev, struct uio *uio)
 	case DEV_EEPROM:
 		if (cputyp == CPU_SUN4)
 			return eeprom_uio(uio);
-		else
 #endif
-		return ENXIO;
-	default:
-		return ENXIO;
 	}
+	return ENXIO;
 }

@@ -1,4 +1,4 @@
-/*        $NetBSD: device-mapper.c,v 1.38 2016/07/11 11:31:50 msaitoh Exp $ */
+/*        $NetBSD: device-mapper.c,v 1.40.4.1 2020/01/21 18:22:51 martin Exp $ */
 
 /*
  * Copyright (c) 2010 The NetBSD Foundation, Inc.
@@ -110,8 +110,6 @@ const struct dkdriver dmdkdriver = {
 CFATTACH_DECL3_NEW(dm, 0,
      dm_match, dm_attach, dm_detach, NULL, NULL, NULL,
      DVF_DETACH_SHUTDOWN);
-
-extern struct cfdriver dm_cd;
 
 extern uint32_t dm_dev_counter;
 
@@ -243,9 +241,10 @@ dm_match(device_t parent, cfdata_t match, void *aux)
 static void
 dm_attach(device_t parent, device_t self, void *aux)
 {
-	return;
-}
 
+	if (!pmf_device_register(self, NULL, NULL))
+		aprint_error_dev(self, "couldn't establish power handler\n");
+}
 
 /*
  * dm_detach:
@@ -258,6 +257,8 @@ static int
 dm_detach(device_t self, int flags)
 {
 	dm_dev_t *dmv;
+
+	pmf_device_deregister(self);
 
 	/* Detach device from global device list */
 	if ((dmv = dm_dev_detach(self)) == NULL)
@@ -506,6 +507,42 @@ disk_ioctl_switch(dev_t dev, u_long cmd, void *data)
 			(void)table_en->target->sync(table_en);
 		}
 		dm_table_release(&dmv->table_head, DM_TABLE_ACTIVE);
+		dm_dev_unbusy(dmv);
+		break;
+	}
+
+	case DIOCGSECTORSIZE:
+	{
+		u_int *valp = data;
+		uint64_t numsec;
+		unsigned int secsize;
+
+		if ((dmv = dm_dev_lookup(NULL, NULL, minor(dev))) == NULL)
+			return ENODEV;
+
+		aprint_debug("DIOCGSECTORSIZE ioctl called\n");
+
+		dm_table_disksize(&dmv->table_head, &numsec, &secsize);
+		*valp = secsize;
+
+		dm_dev_unbusy(dmv);
+		break;
+	}
+
+	case DIOCGMEDIASIZE:
+	{
+		off_t *valp = data;
+		uint64_t numsec;
+		unsigned int secsize;
+
+		if ((dmv = dm_dev_lookup(NULL, NULL, minor(dev))) == NULL)
+			return ENODEV;
+
+		aprint_debug("DIOCGMEDIASIZE ioctl called\n");
+
+		dm_table_disksize(&dmv->table_head, &numsec, &secsize);
+		*valp = numsec;
+
 		dm_dev_unbusy(dmv);
 		break;
 	}

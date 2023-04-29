@@ -28,10 +28,34 @@
 /*	Copyright (c) 1988 AT&T	*/
 /*	All Rights Reserved */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+/*-
+ * Copyright (c) 2010 Pawel Jakub Dawidek <pjd@FreeBSD.org>
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHORS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
 
 #include <sys/types.h>
-#include <sys/ddi.h>
+#include <sys/sunddi.h>
 #include <sys/debug.h>
 #include <sys/errno.h>
 #include <sys/param.h>
@@ -41,6 +65,7 @@
 #include <sys/cmn_err.h>
 #include <sys/namei.h>
 #include <sys/stat.h>
+#include <sys/vnode.h>
 #include <sys/vfs_syscalls.h>
 
 __strong_alias(ddi_strtol,ddi_strtoul)
@@ -118,6 +143,50 @@ do_mkdirp(const char *path)
 	return error;
 }
 
+static void
+do_rmdirp(const char *path)
+{
+	struct pathbuf *pb;
+	struct nameidata nd;
+	char *here, *e;
+	int error;
+
+	here = PNBUF_GET();
+	strlcpy(here, path, MAXPATHLEN);
+	while ((e = strrchr(here, '/')) && e != here) {
+		*e = '\0';
+		pb = pathbuf_create(here);
+		if (pb == NULL)
+			break;
+		/* XXX need do_sys_rmdir()? */
+		NDINIT(&nd, DELETE, LOCKPARENT | LOCKLEAF | TRYEMULROOT, pb);
+		error = namei(&nd);
+		if (error) {
+			pathbuf_destroy(pb);
+			break;
+		}
+		if ((nd.ni_vp->v_vflag & VV_ROOT) ||
+		    nd.ni_vp->v_type != VDIR ||
+		    nd.ni_vp->v_mountedhere ||
+		    nd.ni_vp == nd.ni_dvp) {
+			VOP_ABORTOP(nd.ni_dvp, &nd.ni_cnd);
+			if (nd.ni_vp == nd.ni_dvp)
+				vrele(nd.ni_dvp);
+			else
+				vput(nd.ni_dvp);
+			vput(nd.ni_vp);
+			pathbuf_destroy(pb);
+			break;
+		}
+		error = VOP_RMDIR(nd.ni_dvp, nd.ni_vp, &nd.ni_cnd);
+		vput(nd.ni_dvp);
+		pathbuf_destroy(pb);
+		if (error)
+			break;
+	}
+	PNBUF_PUT(here);
+}
+
 int
 ddi_strtoul(const char *str, char **nptr, int base, unsigned long *result)
 {
@@ -185,6 +254,18 @@ overflow:
 	if (ptr != (const char **)0)
 		*ptr = (char *)ustr;
 	return (ERANGE);
+}
+
+int
+ddi_strtoull(const char *str, char **nptr, int base, unsigned long long *result)
+{
+
+	*result = (unsigned long long)strtoull(str, nptr, base);
+	if (*result == 0)
+		return (EINVAL);
+	else if (*result == ULLONG_MAX)
+		return (ERANGE);
+	return (0);
 }
 
 /*
@@ -526,25 +607,48 @@ ddi_create_minor_node(dev_info_t *dip, char *name, int spec_type,
     minor_t minor_num, char *node_type, int flag)
 {
 	struct lwp *l = curlwp;
+	vnode_t *vp;
+	enum vtype vtype;
+	struct stat sb;
 	char *pn;
 	dev_t dev;
 	int error;
-	register_t ret;
 
-	printf("ddi_create_minor_node: name %s\n", name);
-
-	dev = makedev(flag, minor_num);
-	
 	pn = PNBUF_GET();
-	if (spec_type == S_IFCHR)
+	if (spec_type == S_IFCHR) {
+		vtype = VCHR;
+		dev = makedev(dip->di_cmajor, minor_num);
 		snprintf(pn, MAXPATHLEN, "/dev/zvol/rdsk/%s", name);
-	else
+	} else if (spec_type == S_IFBLK) {
+		vtype = VBLK;
+		dev = makedev(dip->di_bmajor, minor_num);
 		snprintf(pn, MAXPATHLEN, "/dev/zvol/dsk/%s", name);
+	} else {
+		panic("bad spectype %#x", spec_type);
+	}
+	spec_type |= (S_IRUSR | S_IWUSR);
 
+	/* Create missing directories. */
 	if ((error = do_mkdirp(pn)) != 0)
 		goto exit;
-	
-	error = do_sys_mknod(l, (const char *)pn, spec_type, dev, &ret, UIO_SYSSPACE);
+
+	/*
+	 * If node exists and has correct type and rdev all done,
+	 * otherwise unlink the node.
+	 */
+	if (namei_simple_kernel(pn, NSM_NOFOLLOW_NOEMULROOT, &vp) == 0) {
+		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
+		error = vn_stat(vp, &sb);
+		VOP_UNLOCK(vp, 0);
+		if (error == 0 && vp->v_type == vtype && sb.st_rdev == dev) {
+			vrele(vp);
+			return 0;
+		}
+		vrele(vp);
+		(void)do_sys_unlink(pn, UIO_SYSSPACE);
+	}
+
+	error = do_sys_mknod(l, pn, spec_type, dev, UIO_SYSSPACE);
 
 exit:
 	PNBUF_PUT(pn);
@@ -556,20 +660,23 @@ void
 ddi_remove_minor_node(dev_info_t *dip, char *name)
 {
 	char *pn;
-	int error;
 
+	/* Unlink block device and remove empty directories. */
 	pn = PNBUF_GET();
 	snprintf(pn, MAXPATHLEN, "/dev/zvol/dsk/%s", name);
 	(void)do_sys_unlink(pn, UIO_SYSSPACE);
+	do_rmdirp(pn);
 	PNBUF_PUT(pn);
 
-	/* We need to remove raw and block device nodes */
+	/* Unlink raw device and remove empty directories. */
 	pn = PNBUF_GET();
 	snprintf(pn, MAXPATHLEN, "/dev/zvol/rdsk/%s", name);
 	(void)do_sys_unlink(pn, UIO_SYSSPACE);
+	do_rmdirp(pn);
 	PNBUF_PUT(pn);
 }
 
+#if 0
 clock_t
 ddi_get_lbolt()
 {
@@ -583,3 +690,4 @@ ddi_get_lbolt64()
 
 	return hardclock_ticks;
 }
+#endif

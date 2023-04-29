@@ -1,4 +1,4 @@
-/*	$NetBSD: init_main.c,v 1.482 2016/07/07 06:55:43 msaitoh Exp $	*/
+/*	$NetBSD: init_main.c,v 1.504 2019/05/17 03:34:26 ozaki-r Exp $	*/
 
 /*-
  * Copyright (c) 2008, 2009 The NetBSD Foundation, Inc.
@@ -97,7 +97,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: init_main.c,v 1.482 2016/07/07 06:55:43 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: init_main.c,v 1.504 2019/05/17 03:34:26 ozaki-r Exp $");
 
 #include "opt_ddb.h"
 #include "opt_inet.h"
@@ -115,6 +115,8 @@ __KERNEL_RCSID(0, "$NetBSD: init_main.c,v 1.482 2016/07/07 06:55:43 msaitoh Exp 
 #include "opt_ptrace.h"
 #include "opt_rnd_printf.h"
 #include "opt_splash.h"
+#include "opt_kernhist.h"
+#include "opt_gprof.h"
 
 #if defined(SPLASHSCREEN) && defined(makeoptions_SPLASHSCREEN_IMAGE)
 extern void *_binary_splash_image_start;
@@ -175,6 +177,8 @@ extern void *_binary_splash_image_end;
 #include <sys/ksyms.h>
 #include <sys/uidinfo.h>
 #include <sys/kprintf.h>
+#include <sys/bufq.h>
+#include <sys/threadpool.h>
 #ifdef IPSEC
 #include <netipsec/ipsec.h>
 #endif
@@ -190,10 +194,8 @@ extern void *_binary_splash_image_end;
 #endif
 #include <sys/kauth.h>
 #include <net80211/ieee80211_netbsd.h>
-#ifdef PTRACE
-#include <sys/ptrace.h>
-#endif /* PTRACE */
 #include <sys/cprng.h>
+#include <sys/psref.h>
 
 #include <sys/syscall.h>
 #include <sys/syscallargs.h>
@@ -216,6 +218,7 @@ extern void *_binary_splash_image_end;
 
 #include <net/bpf.h>
 #include <net/if.h>
+#include <net/pfil.h>
 #include <net/raw_cb.h>
 #include <net/if_llatbl.h>
 
@@ -233,7 +236,7 @@ struct	proc *initproc;
 
 struct	vnode *rootvp, *swapdev_vp;
 int	boothowto;
-int	cold = 1;			/* still working on startup */
+int	cold __read_mostly = 1;		/* still working on startup */
 struct timespec boottime;	        /* time at system startup - will only follow settime deltas */
 
 int	start_init_exec;		/* semaphore for start_init() */
@@ -265,6 +268,19 @@ main(void)
 #endif
 	CPU_INFO_ITERATOR cii;
 	struct cpu_info *ci;
+
+#ifdef DIAGNOSTIC
+	/*
+	 * Verify that CPU_INFO_FOREACH() knows about the boot CPU
+	 * and only the boot CPU at this point.
+	 */
+	int cpucount = 0;
+	for (CPU_INFO_FOREACH(cii, ci)) {
+		KASSERT(ci == curcpu());
+		cpucount++;
+	}
+	KASSERT(cpucount == 1);
+#endif
 
 	l = &lwp0;
 #ifndef LWP0_CPU_INFO
@@ -351,6 +367,11 @@ main(void)
 
 	/* Initialize the buffer cache */
 	bufinit();
+	biohist_init();
+
+#ifdef KERNHIST
+	sysctl_kernhist_init();
+#endif
 
 
 #if defined(SPLASHSCREEN) && defined(SPLASHSCREEN_IMAGE)
@@ -373,6 +394,9 @@ main(void)
 	procinit();
 	lwpinit();
 
+	/* Must be called after lwpinit (lwpinit_specificdata) */
+	psref_init();
+
 	/* Initialize signal-related data structures. */
 	signal_init();
 
@@ -385,6 +409,9 @@ main(void)
 
 	/* Disable preemption during boot. */
 	kpreempt_disable();
+
+	/* Initialize the threadpool system. */
+	threadpools_init();
 
 	/* Initialize the UID hash table. */
 	uid_init();
@@ -443,11 +470,12 @@ main(void)
 	if (usevnodes > desiredvnodes)
 		desiredvnodes = usevnodes;
 #endif
-	vfsinit();
-	lf_init();
 
 	/* Initialize fstrans. */
 	fstrans_init();
+
+	vfsinit();
+	lf_init();
 
 	/* Initialize the file descriptor system. */
 	fd_sys_init();
@@ -475,6 +503,9 @@ main(void)
 	kern_cprng = cprng_strong_create("kernel", IPL_VM,
 					 CPRNG_INIT_ANY|CPRNG_REKEY_ANY);
 
+	/* Initialize pfil */
+	pfil_init();
+
 	/* Initialize interfaces. */
 	ifinit1();
 
@@ -482,6 +513,14 @@ main(void)
 
 	/* Initialize sockets thread(s) */
 	soinit1();
+
+	/*
+	 * Initialize the bufq strategy sub-system and any built-in
+	 * strategy modules - they may be needed by some devices during
+	 * auto-configuration
+	 */
+	bufq_init();
+	module_init_class(MODULE_CLASS_BUFQ);
 
 	/* Configure the system hardware.  This will enable interrupts. */
 	configure();
@@ -542,6 +581,7 @@ main(void)
 	lltableinit();
 #endif
 	domaininit(true);
+	ifinit_post();
 	if_attachdomain();
 	splx(s);
 
@@ -563,11 +603,6 @@ main(void)
 	ktrinit();
 #endif
 
-#ifdef PTRACE
-	/* Initialize ptrace. */
-	ptrace_init();
-#endif /* PTRACE */
-
 	machdep_init();
 
 	procinit_sysctl();
@@ -583,8 +618,16 @@ main(void)
 	 * wait for us to inform it that the root file system has been
 	 * mounted.
 	 */
-	if (fork1(l, 0, SIGCHLD, NULL, 0, start_init, NULL, NULL, &initproc))
+	if (fork1(l, 0, SIGCHLD, NULL, 0, start_init, NULL, NULL))
 		panic("fork init");
+
+	/*
+	 * The initproc variable cannot be initialized in start_init as there
+	 * is a race between vfs_mountroot and start_init.
+	 */
+	mutex_enter(proc_lock);
+	initproc = proc_find_raw(1);
+	mutex_exit(proc_lock);
 
 	/*
 	 * Load any remaining builtin modules, and hand back temporary
@@ -637,7 +680,16 @@ main(void)
 	 * munched in mi_switch() after the time got set.
 	 */
 	getnanotime(&time);
-	boottime = time;
+	{
+		struct timespec ut;
+		/*
+		 * was:
+		 *	boottime = time;
+		 * but we can do better
+		 */
+		nanouptime(&ut);
+		timespecsub(&time, &ut, &boottime);
+	}
 
 	mutex_enter(proc_lock);
 	LIST_FOREACH(p, &allproc, p_list) {
@@ -863,12 +915,14 @@ check_console(struct lwp *l)
 
 	error = namei_simple_kernel("/dev/console",
 				NSM_FOLLOW_NOEMULROOT, &vp);
-	if (error == 0)
+	if (error == 0) {
 		vrele(vp);
-	else if (error == ENOENT)
-		printf("warning: no /dev/console\n");
-	else
+	} else if (error == ENOENT) {
+		if (boothowto & (AB_VERBOSE|AB_DEBUG))
+			printf("warning: no /dev/console\n");
+	} else {
 		printf("warning: lookup /dev/console: error %d\n", error);
+	}
 }
 
 /*
@@ -931,10 +985,10 @@ start_init(void *arg)
 	 */
 	addr = (vaddr_t)STACK_ALLOC(USRSTACK, PAGE_SIZE);
 	if (uvm_map(&p->p_vmspace->vm_map, &addr, PAGE_SIZE,
-                    NULL, UVM_UNKNOWN_OFFSET, 0,
-                    UVM_MAPFLAG(UVM_PROT_ALL, UVM_PROT_ALL, UVM_INH_COPY,
-		    UVM_ADV_NORMAL,
-                    UVM_FLAG_FIXED|UVM_FLAG_OVERLAY|UVM_FLAG_COPYONW)) != 0)
+	    NULL, UVM_UNKNOWN_OFFSET, 0,
+	    UVM_MAPFLAG(UVM_PROT_RW, UVM_PROT_RW, UVM_INH_COPY,
+	    UVM_ADV_NORMAL,
+	    UVM_FLAG_FIXED|UVM_FLAG_OVERLAY|UVM_FLAG_COPYONW)) != 0)
 		panic("init: couldn't allocate argument space");
 	p->p_vmspace->vm_maxsaddr = (void *)STACK_MAX(addr, PAGE_SIZE);
 

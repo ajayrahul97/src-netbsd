@@ -1,4 +1,4 @@
-/*	$NetBSD: ufs_vfsops.c,v 1.54 2015/03/17 09:39:29 hannken Exp $	*/
+/*	$NetBSD: ufs_vfsops.c,v 1.57 2019/06/20 03:31:30 pgoyette Exp $	*/
 
 /*
  * Copyright (c) 1991, 1993, 1994
@@ -37,18 +37,19 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ufs_vfsops.c,v 1.54 2015/03/17 09:39:29 hannken Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ufs_vfsops.c,v 1.57 2019/06/20 03:31:30 pgoyette Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_ffs.h"
 #include "opt_quota.h"
+#include "opt_wapbl.h"
 #endif
 
 #include <sys/param.h>
-#include <sys/mbuf.h>
 #include <sys/mount.h>
 #include <sys/proc.h>
 #include <sys/buf.h>
+#include <sys/module.h>
 #include <sys/vnode.h>
 #include <sys/kmem.h>
 #include <sys/kauth.h>
@@ -132,7 +133,7 @@ ufs_quotactl(struct mount *mp, struct quotactl_args *args)
 	int error;
 
 	/* Mark the mount busy, as we're passing it to kauth(9). */
-	error = vfs_busy(mp, NULL);
+	error = vfs_busy(mp);
 	if (error) {
 		return (error);
 	}
@@ -141,7 +142,7 @@ ufs_quotactl(struct mount *mp, struct quotactl_args *args)
 	error = quota_handle_cmd(mp, l, args);
 
 	mutex_exit(&mp->mnt_updating);
-	vfs_unbusy(mp, false, NULL);
+	vfs_unbusy(mp);
 	return (error);
 #endif
 }
@@ -188,7 +189,7 @@ ufs_quotactl(struct mount *mp, struct quotactl_args *args)
 	}
 
 	if (error) {
-		vfs_unbusy(mp, false, NULL);
+		vfs_unbusy(mp);
 		return (error);
 	}
 
@@ -223,7 +224,7 @@ ufs_quotactl(struct mount *mp, struct quotactl_args *args)
 		error = EINVAL;
 	}
 	mutex_exit(&mp->mnt_updating);
-	vfs_unbusy(mp, false, NULL);
+	vfs_unbusy(mp);
 	return (error);
 #endif
 
@@ -305,4 +306,36 @@ ufs_done(void)
 #ifdef UFS_EXTATTR
 	ufs_extattr_done();
 #endif
+}
+
+/*
+ * module interface
+ */
+
+#ifdef WAPBL
+MODULE(MODULE_CLASS_MISC, ufs, "wapbl");
+#else
+MODULE(MODULE_CLASS_MISC, ufs, NULL);
+#endif
+
+static int
+ufs_modcmd(modcmd_t cmd, void *arg)
+{
+        int error;
+ 
+        switch (cmd) {
+        case MODULE_CMD_INIT:
+		ufs_init();
+		error = 0;
+		break;
+        case MODULE_CMD_FINI:
+		ufs_done();
+		error = 0;
+		break;
+	default:
+		error = ENOTTY;
+		break;
+	}
+
+	return error;
 }

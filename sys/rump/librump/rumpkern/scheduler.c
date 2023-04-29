@@ -185,6 +185,16 @@ rump_scheduler_init(int numcpu)
 	mutex_init(&unruntime_lock, MUTEX_DEFAULT, IPL_SCHED);
 }
 
+void
+rump_schedlock_cv_signal(struct cpu_info *ci, struct rumpuser_cv *cv)
+{
+	struct rumpcpu *rcpu = cpuinfo_to_rumpcpu(ci);
+
+	rumpuser_mutex_enter_nowrap(rcpu->rcpu_mtx);
+	rumpuser_cv_signal(cv);
+	rumpuser_mutex_exit(rcpu->rcpu_mtx);
+}
+
 /*
  * condvar ops using scheduler lock as the rumpuser interlock.
  */

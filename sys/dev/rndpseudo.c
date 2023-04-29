@@ -1,4 +1,4 @@
-/*	$NetBSD: rndpseudo.c,v 1.35 2015/08/20 14:40:17 christos Exp $	*/
+/*	$NetBSD: rndpseudo.c,v 1.37.4.1 2019/09/03 07:48:00 martin Exp $	*/
 
 /*-
  * Copyright (c) 1997-2013 The NetBSD Foundation, Inc.
@@ -31,7 +31,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: rndpseudo.c,v 1.35 2015/08/20 14:40:17 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: rndpseudo.c,v 1.37.4.1 2019/09/03 07:48:00 martin Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_compat_netbsd.h"
@@ -133,6 +133,7 @@ static int rnd_close(struct file *);
 static int rnd_kqfilter(struct file *, struct knote *);
 
 const struct fileops rnd_fileops = {
+	.fo_name = "rnd",
 	.fo_read = rnd_read,
 	.fo_write = rnd_write,
 	.fo_ioctl = rnd_ioctl,
@@ -359,11 +360,12 @@ rnd_read(struct file *fp, off_t *offp, struct uio *uio, kauth_cred_t cred,
 	 * Choose a CPRNG to use -- either the per-open CPRNG, if this
 	 * is /dev/random or a long read, or the per-CPU one otherwise.
 	 *
-	 * XXX NIST_BLOCK_KEYLEN_BYTES is a detail of the cprng(9)
+	 * XXX NIST_HASH_DRBG_MIN_SEEDLEN_BYTES is a detail of the cprng(9)
 	 * implementation and as such should not be mentioned here.
 	 */
 	struct cprng_strong *const cprng =
-	    ((ctx->rc_hard || (uio->uio_resid > NIST_BLOCK_KEYLEN_BYTES))?
+	    ((ctx->rc_hard ||
+		(uio->uio_resid > NIST_HASH_DRBG_MIN_SEEDLEN_BYTES))?
 		rnd_ctx_cprng(ctx) : rnd_percpu_cprng());
 
 	/*
@@ -458,7 +460,7 @@ rnd_write(struct file *fp, off_t *offp, struct uio *uio,
 #endif
 			break;
 		}
-		n = min(RND_TEMP_BUFFER_SIZE, uio->uio_resid);
+		n = uimin(RND_TEMP_BUFFER_SIZE, uio->uio_resid);
 
 		ret = uiomove((void *)bf, n, uio);
 		if (ret != 0)

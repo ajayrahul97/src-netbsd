@@ -1,4 +1,4 @@
-/*	$NetBSD: md.c,v 1.78 2016/07/27 05:14:40 pgoyette Exp $	*/
+/*	$NetBSD: md.c,v 1.81 2019/05/26 10:22:07 hannken Exp $	*/
 
 /*
  * Copyright (c) 1995 Gordon W. Ross, Leo Weppelman.
@@ -40,7 +40,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: md.c,v 1.78 2016/07/27 05:14:40 pgoyette Exp $");
+__KERNEL_RCSID(0, "$NetBSD: md.c,v 1.81 2019/05/26 10:22:07 hannken Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_md.h"
@@ -135,7 +135,6 @@ static struct dkdriver mddkdriver = {
 	.d_strategy = mdstrategy
 };
 
-extern struct cfdriver md_cd;
 CFATTACH_DECL3_NEW(md, sizeof(struct md_softc),
 	0, md_attach, md_detach, NULL, NULL, NULL, DVF_DETACH_SHUTDOWN);
 
@@ -480,21 +479,19 @@ mdioctl(dev_t dev, u_long cmd, void *data, int flag, struct lwp *l)
 	if ((sc = device_lookup_private(&md_cd, MD_UNIT(dev))) == NULL)
 		return ENXIO;
 
-	mutex_enter(&sc->sc_lock);
 	if (sc->sc_type != MD_UNCONFIGURED) {
 		error = disk_ioctl(&sc->sc_dkdev, dev, cmd, data, flag, l); 
 		if (error != EPASSTHROUGH) {
-			mutex_exit(&sc->sc_lock);
-			return 0;
+			return error;
 		}
 	}
 
 	/* If this is not the raw partition, punt! */
 	if (DISKPART(dev) != RAW_PART) {
-		mutex_exit(&sc->sc_lock);
 		return ENOTTY;
 	}
 
+	mutex_enter(&sc->sc_lock);
 	umd = (struct md_conf *)data;
 	error = EINVAL;
 	switch (cmd) {
@@ -634,8 +631,16 @@ md_ioctl_server(struct md_softc *sc, struct md_conf *umd,
 	/* Sanity check addr, size. */
 	end = (vaddr_t) ((char *)umd->md_addr + umd->md_size);
 
-	if ((end >= VM_MAXUSER_ADDRESS) ||
-		(end < ((vaddr_t) umd->md_addr)) )
+	if (
+#ifndef _RUMPKERNEL
+	    /*
+	     * On some architectures (e.g. powerpc) rump kernel provides
+	     * "safe" low defaults which make this test fail since malloc
+	     * does return higher addresses than the "safe" default.
+	     */
+	    (end >= VM_MAXUSER_ADDRESS) ||
+#endif
+	    (end < ((vaddr_t) umd->md_addr)))
 		return EINVAL;
 
 	/* This unit is now configured. */

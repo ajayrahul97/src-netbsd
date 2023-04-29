@@ -1,4 +1,4 @@
-/* $NetBSD: dtv_demux.c,v 1.6 2014/08/09 13:34:10 jmcneill Exp $ */
+/* $NetBSD: dtv_demux.c,v 1.10 2019/02/24 12:05:49 jmcneill Exp $ */
 
 /*-
  * Copyright (c) 2011 Jared D. McNeill <jmcneill@invisible.ca>
@@ -52,7 +52,7 @@
  */ 
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: dtv_demux.c,v 1.6 2014/08/09 13:34:10 jmcneill Exp $");
+__KERNEL_RCSID(0, "$NetBSD: dtv_demux.c,v 1.10 2019/02/24 12:05:49 jmcneill Exp $");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -75,6 +75,7 @@ static int	dtv_demux_poll(struct file *, int);
 static int	dtv_demux_close(struct file *);
 
 static const struct fileops dtv_demux_fileops = {
+	.fo_name = "dtv_demux",
 	.fo_read = dtv_demux_read,
 	.fo_write = fbadop_write,
 	.fo_ioctl = dtv_demux_ioctl,
@@ -278,7 +279,7 @@ dtv_demux_set_pidfilter(struct dtv_demux *demux, uint16_t pid, bool onoff)
 	 * PID.
 	 */
 	if (pid == 0x2000) {
-		memset(sc->sc_ts.ts_pidfilter, onoff,
+		memset(sc->sc_ts.ts_pidfilter, onoff ? 0xff : 0,
 		    sizeof(sc->sc_ts.ts_pidfilter));
 	} else {
 		sc->sc_ts.ts_pidfilter[pid] = onoff;
@@ -299,8 +300,6 @@ dtv_demux_open(struct dtv_softc *sc, int flags, int mode, lwp_t *l)
 
 	/* Allocate private storage */
 	demux = kmem_zalloc(sizeof(*demux), KM_SLEEP);
-	if (demux == NULL)
-		return ENOMEM;
 	demux->dd_sc = sc;
 	/* Default operation mode is unconfigured */
 	demux->dd_mode = DTV_DEMUX_MODE_NONE;
@@ -669,7 +668,7 @@ dtv_demux_process(struct dtv_demux *demux, const uint8_t *tspkt,
 		sec->sec_bytesused = sec->sec_length = 0;
 
 	/* Copy data into section buffer */
-	avail = min(sec->sec_length - sec->sec_bytesused, brem);
+	avail = uimin(sec->sec_length - sec->sec_bytesused, brem);
 	if (avail < 0)
 		goto done;
 	memcpy(&sec->sec_buf[sec->sec_bytesused], p, avail);

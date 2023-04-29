@@ -1,4 +1,4 @@
-/*	$NetBSD: genfb.c,v 1.58 2015/06/01 20:47:59 nat Exp $ */
+/*	$NetBSD: genfb.c,v 1.67.2.1 2019/08/15 12:21:27 martin Exp $ */
 
 /*-
  * Copyright (c) 2007 Michael Lorenz
@@ -27,7 +27,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: genfb.c,v 1.58 2015/06/01 20:47:59 nat Exp $");
+__KERNEL_RCSID(0, "$NetBSD: genfb.c,v 1.67.2.1 2019/08/15 12:21:27 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -49,6 +49,9 @@ __KERNEL_RCSID(0, "$NetBSD: genfb.c,v 1.58 2015/06/01 20:47:59 nat Exp $");
 
 #include <dev/wsfb/genfbvar.h>
 
+#include <dev/videomode/videomode.h>
+#include <dev/videomode/edidvar.h>
+
 #ifdef GENFB_DISABLE_TEXT
 #include <sys/reboot.h>
 #define DISABLESPLASH (boothowto & (RB_SINGLE | RB_USERCONF | RB_ASKNAME | \
@@ -58,6 +61,7 @@ __KERNEL_RCSID(0, "$NetBSD: genfb.c,v 1.58 2015/06/01 20:47:59 nat Exp $");
 #ifdef _KERNEL_OPT
 #include "opt_genfb.h"
 #include "opt_wsfb.h"
+#include "opt_rasops.h"
 #endif
 
 #ifdef GENFB_DEBUG
@@ -67,12 +71,15 @@ __KERNEL_RCSID(0, "$NetBSD: genfb.c,v 1.58 2015/06/01 20:47:59 nat Exp $");
 #endif
 
 #define GENFB_BRIGHTNESS_STEP 15
+#define	GENFB_CHAR_WIDTH_MM 3
 
 static int	genfb_ioctl(void *, void *, u_long, void *, int, struct lwp *);
 static paddr_t	genfb_mmap(void *, void *, off_t, int);
 static void	genfb_pollc(void *, int);
 
 static void	genfb_init_screen(void *, struct vcons_screen *, int, long *);
+static int	genfb_calc_hsize(struct genfb_softc *);
+static int	genfb_calc_cols(struct genfb_softc *);
 
 static int	genfb_putcmap(struct genfb_softc *, struct wsdisplay_cmap *);
 static int 	genfb_getcmap(struct genfb_softc *, struct wsdisplay_cmap *);
@@ -129,6 +136,15 @@ genfb_init(struct genfb_softc *sc)
 	if (prop_dictionary_get_uint64(dict, "virtual_address", &fbaddr)) {
 		sc->sc_fbaddr = (void *)(uintptr_t)fbaddr;
 	}
+
+	sc->sc_shadowfb = NULL;
+	if (!prop_dictionary_get_bool(dict, "enable_shadowfb",
+	    &sc->sc_enable_shadowfb))
+#ifdef GENFB_SHADOWFB
+		sc->sc_enable_shadowfb = true;
+#else
+		sc->sc_enable_shadowfb = false;
+#endif
 
 	if (!prop_dictionary_get_uint32(dict, "linebytes", &sc->sc_stride))
 		sc->sc_stride = (sc->sc_width * sc->sc_depth) >> 3;
@@ -226,7 +242,8 @@ genfb_attach(struct genfb_softc *sc, struct genfb_ops *ops)
 		0, 0,
 		NULL,
 		8, 16,
-		WSSCREEN_WSCOLORS | WSSCREEN_HILIT,
+		WSSCREEN_WSCOLORS | WSSCREEN_HILIT | WSSCREEN_UNDERLINE |
+		  WSSCREEN_RESIZE,
 		NULL
 	};
 	sc->sc_screens[0] = &sc->sc_defaultscreen_descr;
@@ -240,11 +257,14 @@ genfb_attach(struct genfb_softc *sc, struct genfb_ops *ops)
 	sc->sc_accessops.mmap = genfb_mmap;
 	sc->sc_accessops.pollc = genfb_pollc;
 
-#ifdef GENFB_SHADOWFB
-	sc->sc_shadowfb = kmem_alloc(sc->sc_fbsize, KM_SLEEP);
-	if (sc->sc_want_clear == false && sc->sc_shadowfb != NULL)
-		memcpy(sc->sc_shadowfb, sc->sc_fbaddr, sc->sc_fbsize);
-#endif
+	if (sc->sc_enable_shadowfb) {
+		sc->sc_shadowfb = kmem_alloc(sc->sc_fbsize, KM_SLEEP);
+		if (sc->sc_want_clear == false)
+			memcpy(sc->sc_shadowfb, sc->sc_fbaddr, sc->sc_fbsize);
+		aprint_verbose_dev(sc->sc_dev,
+		    "shadow framebuffer enabled, size %zu KB\n",
+		    sc->sc_fbsize >> 10);
+	}
 
 	vcons_init(&sc->vd, sc, &sc->sc_defaultscreen_descr,
 	    &sc->sc_accessops);
@@ -288,7 +308,7 @@ genfb_attach(struct genfb_softc *sc, struct genfb_ops *ops)
 
 #ifdef SPLASHSCREEN
 	j = 0;
-	for (i = 0; i < min(1 << sc->sc_depth, 256); i++) {
+	for (i = 0; i < uimin(1 << sc->sc_depth, 256); i++) {
 		if (i >= SPLASH_CMAP_OFFSET &&
 		    i < SPLASH_CMAP_OFFSET + SPLASH_CMAP_SIZE) {
 			splash_get_cmap(i,
@@ -520,6 +540,8 @@ genfb_init_screen(void *cookie, struct vcons_screen *scr,
 {
 	struct genfb_softc *sc = cookie;
 	struct rasops_info *ri = &scr->scr_ri;
+	int wantcols;
+	bool is_bgr;
 
 	ri->ri_depth = sc->sc_depth;
 	ri->ri_width = sc->sc_width;
@@ -529,28 +551,25 @@ genfb_init_screen(void *cookie, struct vcons_screen *scr,
 	if (sc->sc_want_clear)
 		ri->ri_flg |= RI_FULLCLEAR;
 
-#ifdef GENFB_SHADOWFB
-	if (sc->sc_shadowfb != NULL) {
+	scr->scr_flags |= VCONS_LOADFONT;
 
+	if (sc->sc_shadowfb != NULL) {
 		ri->ri_hwbits = (char *)sc->sc_fbaddr;
 		ri->ri_bits = (char *)sc->sc_shadowfb;
-	} else
-#endif
-	{
+	} else {
 		ri->ri_bits = (char *)sc->sc_fbaddr;
 		scr->scr_flags |= VCONS_DONT_READ;
 	}
 
-	if (existing && sc->sc_want_clear) {
+	if (existing && sc->sc_want_clear)
 		ri->ri_flg |= RI_CLEAR;
-	}
 
-	if (ri->ri_depth == 32 || ri->ri_depth == 24) {
-		bool is_bgr = false;
+	switch (ri->ri_depth) {
+	case 32:
+	case 24:
+		ri->ri_flg |= RI_ENABLE_ALPHA;
 
-		if (ri->ri_depth == 32) {
-			ri->ri_flg |= RI_ENABLE_ALPHA;
-		}
+		is_bgr = false;
 		prop_dictionary_get_bool(device_properties(sc->sc_dev),
 		    "is_bgr", &is_bgr);
 		if (is_bgr) {
@@ -570,15 +589,31 @@ genfb_init_screen(void *cookie, struct vcons_screen *scr,
 			ri->ri_gpos = 8;
 			ri->ri_bpos = 0;
 		}
+		break;
+
+	case 16:
+	case 15:
+		ri->ri_flg |= RI_ENABLE_ALPHA;
+		break;
+
+	case 8:
+		if (sc->sc_cmcb != NULL)
+			ri->ri_flg |= RI_ENABLE_ALPHA | RI_8BIT_IS_RGB;
+		break;
+
+	case 2:
+		ri->ri_flg |= RI_ENABLE_ALPHA;
+		break;
+
+	default:
+		break;
 	}
 
-	if (ri->ri_depth == 8 && sc->sc_cmcb != NULL)
-		ri->ri_flg |= RI_ENABLE_ALPHA | RI_8BIT_IS_RGB;
+	wantcols = genfb_calc_cols(sc);
 
-
-	rasops_init(ri, 0, 0);
-	ri->ri_caps = WSSCREEN_WSCOLORS;
-
+	rasops_init(ri, 0, wantcols);
+	ri->ri_caps = WSSCREEN_WSCOLORS | WSSCREEN_HILIT | WSSCREEN_UNDERLINE |
+		  WSSCREEN_RESIZE;
 	rasops_reconfig(ri, sc->sc_height / ri->ri_font->fontheight,
 		    sc->sc_width / ri->ri_font->fontwidth);
 
@@ -589,6 +624,36 @@ genfb_init_screen(void *cookie, struct vcons_screen *scr,
 	if (scr == &sc->sc_console_screen && !DISABLESPLASH)
 		SCREEN_DISABLE_DRAWING(&sc->sc_console_screen);
 #endif
+}
+
+/* Returns the width of the display in millimeters, or 0 if not known. */
+static int
+genfb_calc_hsize(struct genfb_softc *sc)
+{
+	device_t dev = sc->sc_dev;
+	prop_dictionary_t dict = device_properties(dev);
+	prop_data_t edid_data;
+	struct edid_info edid;
+	const char *edid_ptr;
+
+	edid_data = prop_dictionary_get(dict, "EDID");
+	if (edid_data == NULL || prop_data_size(edid_data) < 128)
+		return 0;
+
+	edid_ptr = prop_data_data_nocopy(edid_data);
+	if (edid_parse(__UNCONST(edid_ptr), &edid) != 0)
+		return 0;
+
+	return (int)edid.edid_max_hsize * 10;
+}
+
+/* Return the minimum number of character columns based on DPI */
+static int
+genfb_calc_cols(struct genfb_softc *sc)
+{
+	const int hsize = genfb_calc_hsize(sc);
+
+	return MAX(RASOPS_DEFAULT_WIDTH, hsize / GENFB_CHAR_WIDTH_MM);
 }
 
 static int
@@ -603,9 +668,9 @@ genfb_putcmap(struct genfb_softc *sc, struct wsdisplay_cmap *cm)
 #ifdef GENFB_DEBUG
 	aprint_debug("putcmap: %d %d\n",index, count);
 #endif
-	if (cm->index >= 256 || cm->count > 256 ||
-	    (cm->index + cm->count) > 256)
+	if (index >= 256 || count > 256 || index + count > 256)
 		return EINVAL;
+
 	error = copyin(cm->red, &rbuf[index], count);
 	if (error)
 		return error;
@@ -639,7 +704,7 @@ genfb_getcmap(struct genfb_softc *sc, struct wsdisplay_cmap *cm)
 	u_int count = cm->count;
 	int error;
 
-	if (index >= 255 || count > 256 || index + count > 256)
+	if (index >= 256 || count > 256 || index + count > 256)
 		return EINVAL;
 
 	error = copyout(&sc->sc_cmap_red[index],   cm->red,   count);

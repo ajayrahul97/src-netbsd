@@ -1,4 +1,4 @@
-/*	$NetBSD: if_casvar.h,v 1.5 2015/04/14 20:32:36 riastradh Exp $ */
+/*	$NetBSD: if_casvar.h,v 1.6.4.1 2020/01/21 11:55:58 martin Exp $ */
 /*	$OpenBSD: if_casvar.h,v 1.6 2009/06/13 12:18:58 kettenis Exp $	*/
 
 /*
@@ -158,6 +158,17 @@ struct cas_softc {
 	int		sc_burst;	/* DVMA burst size in effect */
 	int		sc_phys[2];	/* MII instance -> PHY map */
 
+	u_int		sc_variant;
+#define	CAS_UNKNOWN	0		/* don't know */
+#define	CAS_CAS		1		/* Sun Cassini */
+#if 0 /* notyet */
+#define	CAS_CASPLUS	2		/* Sun Cassini+ */
+#endif
+#define	CAS_SATURN	3		/* National Semiconductor Saturn */
+
+	u_int		sc_flags;
+#define	CAS_SERDES	(1 << 4)	/* use the SERDES */
+
 	int		sc_mif_config;	/* Selected MII reg setting */
 
 	/*
@@ -257,7 +268,5 @@ do {									\
 
 #define CAS_INTR_PCI	1
 #define CAS_INTR_REG	2
-
-#define ETHER_ALIGN	2
 
 #endif

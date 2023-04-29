@@ -1,10 +1,13 @@
-#	$NetBSD: Makefile,v 1.87 2016/07/03 14:24:58 christos Exp $
+#	$NetBSD: Makefile,v 1.94.2.1 2019/09/27 09:24:29 martin Exp $
 #
 
+NOSANITIZER=	# defined
 WARNS?=	5
 LIB=	pthread
 
 .include <bsd.own.mk>
+
+USE_SHLIBDIR=	yes
 
 .if defined(PTHREAD_MACHINE_ARCH) && !empty(PTHREAD_MACHINE_ARCH) && \
     exists(${.CURDIR}/arch/${PTHREAD_MACHINE_ARCH})
@@ -65,6 +68,7 @@ SRCS+=	pthread_specific.c
 SRCS+=	pthread_spin.c
 SRCS+=	pthread_tsd.c
 SRCS+=	res_state.c
+.PATH: ${.CURDIR}/../librt
 SRCS+=	sem.c
 # Architecture-dependent files
 .if exists(${ARCHDIR}/pthread_md.S)
@@ -90,30 +94,12 @@ SRCS+=		pthread_compat.c
 
 ALIGN_FUNCTIONS=	${${ACTIVE_CC} == "gcc":? -falign-functions=32 :}
 
-.if ${MACHINE_CPU} != "m68k" && ${MACHINE_CPU} != "sh3" && ${MACHINE_ARCH} != "vax"
-OMIT_FRAME_POINTER=	-fomit-frame-pointer
-.else
-OMIT_FRAME_POINTER=
-.endif
-
 # The TSD routines are used in the implementation of profiling, and so
 # can't be profiled themselves.
-COPTS.pthread_specific.c+=	${OMIT_FRAME_POINTER} ${ALIGN_FUNCTIONS}
+COPTS.pthread_specific.c+=	${ALIGN_FUNCTIONS}
 pthread_specific.po: pthread_specific.o
 	${_MKTARGET_CREATE}
 	cp pthread_specific.o pthread_specific.po
-
-# Internal spinlock routines are performance critical.  Don't profile them,
-# it's incompatibile with -fomit-frame-pointer.
-COPTS.pthread_lock.c+=	${OMIT_FRAME_POINTER} ${ALIGN_FUNCTIONS}
-pthread_lock.po: pthread_lock.o
-	${_MKTARGET_CREATE}
-	cp pthread_lock.o pthread_lock.po
-
-COPTS.pthread_mutex.c+=	${OMIT_FRAME_POINTER} ${ALIGN_FUNCTIONS}
-pthread_mutex.po: pthread_mutex.o
-	${_MKTARGET_CREATE}
-	cp pthread_mutex.o pthread_mutex.po
 
 COPTS.pthread.c += -Wno-stack-protector -Wno-format-nonliteral
 COPTS.pthread_attr.c += -Wno-format-nonliteral
@@ -245,6 +231,59 @@ MLINKS+=	pthread_schedparam.3 pthread_getschedparam.3
 MLINKS+=	pthread_suspend_np.3 pthread_resume_np.3
 MLINKS+=	pthread_testcancel.3 pthread_setcancelstate.3
 MLINKS+=	pthread_testcancel.3 pthread_setcanceltype.3
+
+# ISO C threads (ISO/IEC 9899:2011)
+
+SRCS+=		call_once.c cnd.c mtx.c thrd.c tss.c
+MAN+=		threads.3 call_once.3 cnd.3 mtx.3 thrd.3 tss.3
+
+MLINKS+=	call_once.3 ONCE_FLAG_INIT.3
+MLINKS+=	call_once.3 once_flag.3
+
+MLINKS+=	cnd.3 cnd_broadcast.3
+MLINKS+=	cnd.3 cnd_destroy.3
+MLINKS+=	cnd.3 cnd_init.3
+MLINKS+=	cnd.3 cnd_signal.3
+MLINKS+=	cnd.3 cnd_timedwait.3
+MLINKS+=	cnd.3 cnd_wait.3
+
+MLINKS+=	mtx.3 mtx_destroy.3
+MLINKS+=	mtx.3 mtx_init.3
+MLINKS+=	mtx.3 mtx_lock.3
+MLINKS+=	mtx.3 mtx_timedlock.3
+MLINKS+=	mtx.3 mtx_trylock.3
+MLINKS+=	mtx.3 mtx_unlock.3
+
+MLINKS+=	thrd.3 thrd_create.3
+MLINKS+=	thrd.3 thrd_current.3
+MLINKS+=	thrd.3 thrd_detach.3
+MLINKS+=	thrd.3 thrd_equal.3
+MLINKS+=	thrd.3 thrd_exit.3
+MLINKS+=	thrd.3 thrd_join.3
+MLINKS+=	thrd.3 thrd_sleep.3
+MLINKS+=	thrd.3 thrd_yield.3
+
+MLINKS+=	tss.3 TSS_DTOR_ITERATIONS.3
+MLINKS+=	tss.3 tss_create.3
+MLINKS+=	tss.3 tss_delete.3
+MLINKS+=	tss.3 tss_get.3
+MLINKS+=	tss.3 tss_set.3
+
+INCS+=		threads.h
+
+# PR lib/54001: create libpthread.a as a single large object, with all the
+# symbols in one section. ensures that if any libpthread function is used,
+# you get all of them from libpthread, and not the libc stubs.
+#
+# This makes -lpthread equivalent to -Wl,--whole-archive -lpthread
+
+__archivebuild: .USE
+	${_MKTARGET_BUILD}
+	@rm -f ${.TARGET}
+	${LD} -r -o ${.TARGET}.o `NM=${NM} ${LORDER} ${.ALLSRC:M*o} | ${TSORT}`
+	${AR} ${_ARFL} ${.TARGET} ${.TARGET}.o
+
+CLEANFILES+=	${_LIBS:=.o}
 
 .include <bsd.lib.mk>
 

@@ -1,4 +1,4 @@
-/*      $NetBSD: procfs_linux.c,v 1.72 2016/03/28 17:23:47 mlelstv Exp $      */
+/*      $NetBSD: procfs_linux.c,v 1.74.4.2 2019/09/13 06:25:26 martin Exp $      */
 
 /*
  * Copyright (c) 2001 Wasabi Systems, Inc.
@@ -36,7 +36,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: procfs_linux.c,v 1.72 2016/03/28 17:23:47 mlelstv Exp $");
+__KERNEL_RCSID(0, "$NetBSD: procfs_linux.c,v 1.74.4.2 2019/09/13 06:25:26 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -75,19 +75,15 @@ extern int max_devsw_convs;
 #define LBFSZ (8 * 1024)
 
 static void
-get_proc_size_info(struct lwp *l, unsigned long *stext, unsigned long *etext, unsigned long *sstack)
+get_proc_size_info(struct proc *p, struct vm_map *map, unsigned long *stext,
+    unsigned long *etext, unsigned long *sstack)
 {
-	struct proc *p = l->l_proc;
-	struct vmspace *vm;
-	struct vm_map *map;
 	struct vm_map_entry *entry;
 
 	*stext = 0;
 	*etext = 0;
 	*sstack = 0;
 
-	proc_vmspace_getref(p, &vm);
-	map = &vm->vm_map;
 	vm_map_lock_read(map);
 
 	for (entry = map->header.next; entry != &map->header;
@@ -128,7 +124,6 @@ get_proc_size_info(struct lwp *l, unsigned long *stext, unsigned long *etext, un
 	*sstack -= PAGE_SIZE;
 
 	vm_map_unlock_read(map);
-	uvmspace_free(vm);
 }
 
 /*
@@ -383,7 +378,8 @@ procfs_do_pid_statm(struct lwp *curl, struct lwp *l,
 	mutex_enter(p->p_lock);
 
 	/* retrieve RSS size */
-	fill_kproc2(p, &ki, false);
+	memset(&ki, 0, sizeof(ki));
+	fill_kproc2(p, &ki, false, false);
 
 	mutex_exit(p->p_lock);
 	mutex_exit(proc_lock);
@@ -435,12 +431,13 @@ procfs_do_pid_stat(struct lwp *curl, struct lwp *l,
 		goto out;
 	}
 
-	get_proc_size_info(l, &stext, &etext, &sstack);
+	get_proc_size_info(p, &vm->vm_map, &stext, &etext, &sstack);
 
 	mutex_enter(proc_lock);
 	mutex_enter(p->p_lock);
 
-	fill_kproc2(p, &ki, false);
+	memset(&ki, 0, sizeof(ki));
+	fill_kproc2(p, &ki, false, false);
 	calcru(p, NULL, NULL, NULL, &rt);
 
 	len = snprintf(bf, LBFSZ,
@@ -603,26 +600,22 @@ procfs_domounts(struct lwp *curl, struct proc *p,
 {
 	char *bf, *mtab = NULL;
 	size_t mtabsz = 0;
-	struct mount *mp, *nmp;
+	mount_iterator_t *iter;
+	struct mount *mp;
 	int error = 0, root = 0;
 	struct cwdinfo *cwdi = curl->l_proc->p_cwdi;
 
 	bf = malloc(LBFSZ, M_TEMP, M_WAITOK);
 
-	mutex_enter(&mountlist_lock);
-	for (mp = TAILQ_FIRST(&mountlist); mp != NULL; mp = nmp) {
+	mountlist_iterator_init(&iter);
+	while ((mp = mountlist_iterator_next(iter)) != NULL) {
 		struct statvfs sfs;
-
-		if (vfs_busy(mp, &nmp))
-			continue;
 
 		if ((error = dostatvfs(mp, &sfs, curl, MNT_WAIT, 0)) == 0)
 			root |= procfs_format_sfs(&mtab, &mtabsz, bf, LBFSZ,
 			    &sfs, curl, 0);
-
-		vfs_unbusy(mp, false, &nmp);
 	}
-	mutex_exit(&mountlist_lock);
+	mountlist_iterator_destroy(iter);
 
 	/*
 	 * If we are inside a chroot that is not itself a mount point,

@@ -1,4 +1,4 @@
-/*      $NetBSD: ac97.c,v 1.96 2015/04/04 15:09:45 christos Exp $ */
+/*      $NetBSD: ac97.c,v 1.98 2019/05/08 13:40:18 isaki Exp $ */
 /*	$OpenBSD: ac97.c,v 1.8 2000/07/19 09:01:35 csapuntz Exp $	*/
 
 /*
@@ -63,7 +63,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ac97.c,v 1.96 2015/04/04 15:09:45 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ac97.c,v 1.98 2019/05/08 13:40:18 isaki Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -73,7 +73,7 @@ __KERNEL_RCSID(0, "$NetBSD: ac97.c,v 1.96 2015/04/04 15:09:45 christos Exp $");
 #include <sys/sysctl.h>
 
 #include <sys/audioio.h>
-#include <dev/audio_if.h>
+#include <dev/audio/audio_if.h>
 
 #include <dev/ic/ac97reg.h>
 #include <dev/ic/ac97var.h>
@@ -1677,7 +1677,7 @@ ac97_query_devinfo(struct ac97_codec_if *codec_if, mixer_devinfo_t *dip)
 	const char *name;
 
 	as = (struct ac97_softc *)codec_if;
-	if (dip->index < as->num_source_info) {
+	if (dip->index >= 0 && dip->index < as->num_source_info) {
 		si = &as->source_info[dip->index];
 		dip->type = si->type;
 		dip->mixer_class = si->mixer_class;

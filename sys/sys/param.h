@@ -1,4 +1,4 @@
-/*	$NetBSD: param.h,v 1.500 2016/07/11 16:10:10 matt Exp $	*/
+/*	$NetBSD: param.h,v 1.599.2.6 2020/02/16 12:16:28 martin Exp $	*/
 
 /*-
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -67,7 +67,7 @@
  *	2.99.9		(299000900)
  */
 
-#define	__NetBSD_Version__	799003400	/* NetBSD 7.99.34 */
+#define	__NetBSD_Version__	900000000	/* NetBSD 9.0_STABLE */
 
 #define __NetBSD_Prereq__(M,m,p) (((((M) * 100000000) + \
     (m) * 1000000) + (p) * 100) <= __NetBSD_Version__)
@@ -87,7 +87,7 @@
 #define	NetBSD	199905		/* NetBSD version (year & month). */
 
 /*
- * There macros determine if we are running in protected mode or not.
+ * These macros determine if we are running in protected mode or not.
  *   _HARDKERNEL: code uses kernel namespace and runs in hw priviledged mode
  *   _SOFTKERNEL: code uses kernel namespace but runs without hw priviledges
  */
@@ -173,6 +173,17 @@
 #include <machine/param.h>
 #include <machine/limits.h>
 
+#define	DEV_BSHIFT	9			/* log2(DEV_BSIZE) */
+#define	DEV_BSIZE	(1 << DEV_BSHIFT)	/* 512 */
+
+#ifndef BLKDEV_IOSIZE
+#define	BLKDEV_IOSIZE	2048
+#endif
+
+#ifndef MAXPHYS
+#define	MAXPHYS		(64 * 1024)		/* max raw I/O transfer size */
+#endif
+
 /* pages ("clicks") to disk blocks */
 #define	ctod(x)		((x) << (PGSHIFT - DEV_BSHIFT))
 #define	dtoc(x)		((x) >> (PGSHIFT - DEV_BSHIFT))
@@ -242,9 +253,22 @@
  * any desired pointer type.
  *
  * ALIGNED_POINTER is a boolean macro that checks whether an address
- * is valid to fetch data elements of type t from on this architecture.
- * This does not reflect the optimal alignment, just the possibility
- * (within reasonable limits).
+ * is valid to fetch data elements of type t from on this architecture
+ * using ALIGNED_POINTER_LOAD.  This does not reflect the optimal
+ * alignment, just the possibility (within reasonable limits).
+ *
+ *	uint32_t x;
+ *	unsigned char *p = ...;
+ *
+ *	if (ALIGNED_POINTER(p, uint32_t)) {
+ *		uint32_t t;
+ *		ALIGNED_POINTER_LOAD(&t, p, uint32_t);
+ *		x = t;
+ *	} else {
+ *		uint32_t t;
+ *		memcpy(&t, p, sizeof(t));
+ *		x = t;
+ *	}
  *
  */
 #define ALIGNBYTES	__ALIGNBYTES
@@ -253,6 +277,9 @@
 #endif
 #ifndef ALIGNED_POINTER
 #define	ALIGNED_POINTER(p,t)	((((uintptr_t)(p)) & (sizeof(t) - 1)) == 0)
+#endif
+#ifndef ALIGNED_POINTER_LOAD
+#define	ALIGNED_POINTER_LOAD(q,p,t)	(*(q) = *((const t *)(p)))
 #endif
 
 /*
@@ -361,7 +388,7 @@
  * This is the maximum individual filename component length enforced by
  * namei. Filesystems cannot exceed this limit. The upper bound for that
  * limit is NAME_MAX. We don't bump it for now, for compatibility with
- * old binaries during the time where MAXPATHLEN was 511 and NAME_MAX was
+ * old binaries during the time where MAXNAMLEN was 511 and NAME_MAX was
  * 255
  */
 #define	KERNEL_NAME_MAX	255
@@ -477,6 +504,8 @@
 	    ((t +0u) / hz) * 1000u : \
 	    ((t +0u) * 1000u) / hz)
 #endif
+
+#define	hz2bintime(t)	(ms2bintime(hztoms(t)))
 
 extern const int schedppq;
 extern size_t coherency_unit;

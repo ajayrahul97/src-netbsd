@@ -1,4 +1,4 @@
-/*	$NetBSD: netbsd32_compat_43.c,v 1.53 2010/04/23 23:05:40 joerg Exp $	*/
+/*	$NetBSD: netbsd32_compat_43.c,v 1.57.4.2 2020/01/02 09:50:34 martin Exp $	*/
 
 /*
  * Copyright (c) 1998, 2001 Matthew R. Green
@@ -27,7 +27,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: netbsd32_compat_43.c,v 1.53 2010/04/23 23:05:40 joerg Exp $");
+__KERNEL_RCSID(0, "$NetBSD: netbsd32_compat_43.c,v 1.57.4.2 2020/01/02 09:50:34 martin Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_compat_43.h"
@@ -35,6 +35,7 @@ __KERNEL_RCSID(0, "$NetBSD: netbsd32_compat_43.c,v 1.53 2010/04/23 23:05:40 joer
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/module.h>
 #include <sys/fcntl.h>
 #include <sys/filedesc.h>
 #include <sys/mbuf.h>
@@ -45,6 +46,7 @@ __KERNEL_RCSID(0, "$NetBSD: netbsd32_compat_43.c,v 1.53 2010/04/23 23:05:40 joer
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/stat.h>
+#include <sys/syscallvar.h>
 #include <sys/syscallargs.h>
 #include <sys/time.h>
 #include <sys/ucred.h>
@@ -54,6 +56,7 @@ __KERNEL_RCSID(0, "$NetBSD: netbsd32_compat_43.c,v 1.53 2010/04/23 23:05:40 joer
 #include <sys/swap.h>
 
 #include <compat/netbsd32/netbsd32.h>
+#include <compat/netbsd32/netbsd32_syscall.h>
 #include <compat/netbsd32/netbsd32_syscallargs.h>
 
 #include <compat/sys/stat.h>
@@ -67,7 +70,6 @@ __KERNEL_RCSID(0, "$NetBSD: netbsd32_compat_43.c,v 1.53 2010/04/23 23:05:40 joer
 SYS_DEF(compat_43_netbsd32_sethostid);
 SYS_DEF(compat_43_netbsd32_killpg);
 SYS_DEF(compat_43_netbsd32_sigblock);
-SYS_DEF(compat_43_netbsd32_sigblock);
 SYS_DEF(compat_43_netbsd32_sigsetmask);
 #undef SYS_DEF
 
@@ -75,6 +77,7 @@ static void
 netbsd32_from_stat(const struct stat *sb, struct netbsd32_stat43 *sp32)
 {
 
+	memset(sp32, 0, sizeof(*sp32));
 	sp32->st_dev = sb->st_dev;
 	sp32->st_ino = sb->st_ino;
 	sp32->st_mode = sb->st_mode;
@@ -430,7 +433,7 @@ compat_43_netbsd32_orecvmsg(struct lwp *l, const struct compat_43_netbsd32_orecv
 	struct iovec *iov, aiov[UIO_SMALLIOV];
 	int error;
 
-	error = copyin(SCARG_P32(uap, msg), &omsg, sizeof (struct omsghdr));
+	error = copyin(SCARG_P32(uap, msg), &omsg, sizeof(omsg));
 	if (error)
 		return (error);
 
@@ -515,7 +518,7 @@ compat_43_netbsd32_osendmsg(struct lwp *l, const struct compat_43_netbsd32_osend
 	struct sockaddr *sa;
 	int error;
 
-	error = copyin(SCARG_P32(uap, msg), &omsg, sizeof (struct omsghdr));
+	error = copyin(SCARG_P32(uap, msg), &omsg, sizeof(omsg));
 	if (error != 0)
 		return (error);
 
@@ -529,7 +532,7 @@ compat_43_netbsd32_osendmsg(struct lwp *l, const struct compat_43_netbsd32_osend
 	msg.msg_flags = MSG_NAMEMBUF;
 
 	error = sockargs(&nam, NETBSD32PTR64(omsg.msg_name), omsg.msg_namelen,
-	    MT_SONAME);
+	    UIO_USERSPACE, MT_SONAME);
 	if (error != 0)
 		goto out;
 
@@ -547,7 +550,8 @@ compat_43_netbsd32_osendmsg(struct lwp *l, const struct compat_43_netbsd32_osend
 		goto out;
 	}
 
-	error = do_sys_sendmsg(l, SCARG(uap, s), &msg, SCARG(uap, flags), retval);
+	error = do_sys_sendmsg(l, SCARG(uap, s), &msg, SCARG(uap, flags),
+	    retval);
 
     out:
 	if (iov != aiov)
@@ -706,4 +710,84 @@ compat_43_netbsd32_osigstack(struct lwp *l, const struct compat_43_netbsd32_osig
 	}
 
 	return error;
+}
+
+static struct syscall_package compat_netbsd32_43_syscalls[] = {
+	{ NETBSD32_SYS_compat_43_netbsd32_ocreat, 0,
+	    (sy_call_t *)compat_43_netbsd32_ocreat },
+	{ NETBSD32_SYS_compat_43_netbsd32_olseek, 0,
+	    (sy_call_t *)compat_43_netbsd32_olseek },
+	{ NETBSD32_SYS_compat_43_netbsd32_stat43, 0,
+	    (sy_call_t *)compat_43_netbsd32_stat43 },
+	{ NETBSD32_SYS_compat_43_netbsd32_lstat43, 0,
+	    (sy_call_t *)compat_43_netbsd32_lstat43 },
+	{ NETBSD32_SYS_compat_43_netbsd32_fstat43, 0,
+	    (sy_call_t *)compat_43_netbsd32_fstat43 },
+	{ NETBSD32_SYS_compat_43_netbsd32_otruncate, 0,
+	    (sy_call_t *)compat_43_netbsd32_otruncate },
+	{ NETBSD32_SYS_compat_43_netbsd32_oftruncate, 0,
+	    (sy_call_t *)compat_43_netbsd32_oftruncate },
+	{ NETBSD32_SYS_compat_43_netbsd32_ogetdirentries, 0,
+	    (sy_call_t *)compat_43_netbsd32_ogetdirentries },
+	{ NETBSD32_SYS_compat_43_netbsd32_ogetkerninfo, 0,
+	    (sy_call_t *)compat_43_netbsd32_ogetkerninfo },
+	{ NETBSD32_SYS_compat_43_netbsd32_ogethostname, 0,
+	    (sy_call_t *)compat_43_netbsd32_ogethostname },
+	{ NETBSD32_SYS_compat_43_netbsd32_osethostname, 0,
+	    (sy_call_t *)compat_43_netbsd32_osethostname },
+	{ NETBSD32_SYS_compat_43_netbsd32_sethostid, 0,
+	    (sy_call_t *)compat_43_netbsd32_sethostid },
+	{ NETBSD32_SYS_compat_43_netbsd32_ogetrlimit, 0,
+	    (sy_call_t *)compat_43_netbsd32_ogetrlimit },
+	{ NETBSD32_SYS_compat_43_netbsd32_osetrlimit, 0,
+	    (sy_call_t *)compat_43_netbsd32_osetrlimit },
+	{ NETBSD32_SYS_compat_43_netbsd32_killpg, 0,
+	    (sy_call_t *)compat_43_netbsd32_killpg },
+	{ NETBSD32_SYS_compat_43_netbsd32_ommap, 0,
+	    (sy_call_t *)compat_43_netbsd32_ommap },
+	{ NETBSD32_SYS_compat_43_netbsd32_oaccept, 0,
+	    (sy_call_t *)compat_43_netbsd32_oaccept },
+	{ NETBSD32_SYS_compat_43_netbsd32_osend, 0,
+	    (sy_call_t *)compat_43_netbsd32_osend },
+	{ NETBSD32_SYS_compat_43_netbsd32_orecv, 0,
+	    (sy_call_t *)compat_43_netbsd32_orecv },
+	{ NETBSD32_SYS_compat_43_netbsd32_orecvmsg, 0,
+	    (sy_call_t *)compat_43_netbsd32_orecvmsg },
+	{ NETBSD32_SYS_compat_43_netbsd32_osendmsg, 0,
+	    (sy_call_t *)compat_43_netbsd32_osendmsg },
+	{ NETBSD32_SYS_compat_43_netbsd32_orecvfrom, 0,
+	    (sy_call_t *)compat_43_netbsd32_orecvfrom },
+	{ NETBSD32_SYS_compat_43_netbsd32_ogetsockname, 0,
+	    (sy_call_t *)compat_43_netbsd32_ogetsockname },
+	{ NETBSD32_SYS_compat_43_netbsd32_ogetpeername, 0,
+	    (sy_call_t *)compat_43_netbsd32_ogetpeername },
+	{ NETBSD32_SYS_compat_43_netbsd32_osigvec, 0,
+	    (sy_call_t *)compat_43_netbsd32_osigvec },
+	{ NETBSD32_SYS_compat_43_netbsd32_sigblock, 0,
+	    (sy_call_t *)compat_43_netbsd32_sigblock },
+	{ NETBSD32_SYS_compat_43_netbsd32_sigsetmask, 0,
+	    (sy_call_t *)compat_43_netbsd32_sigsetmask },
+	{ NETBSD32_SYS_compat_43_netbsd32_osigstack, 0,
+	    (sy_call_t *)compat_43_netbsd32_osigstack },
+	{ 0, 0, NULL }
+}; 
+
+MODULE(MODULE_CLASS_EXEC, compat_netbsd32_43, "compat_netbsd32,compat_43");
+
+static int
+compat_netbsd32_43_modcmd(modcmd_t cmd, void *arg)
+{
+
+	switch (cmd) {
+	case MODULE_CMD_INIT:
+		return syscall_establish(&emul_netbsd32,
+		    compat_netbsd32_43_syscalls);
+
+	case MODULE_CMD_FINI:
+		return syscall_disestablish(&emul_netbsd32,
+		    compat_netbsd32_43_syscalls);
+
+	default:
+		return ENOTTY;
+	}
 }

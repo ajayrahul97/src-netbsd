@@ -1,4 +1,4 @@
-/*	$NetBSD: mkfs_msdos.c,v 1.10 2016/04/03 11:00:13 mlelstv Exp $	*/
+/*	$NetBSD: mkfs_msdos.c,v 1.14.6.1 2019/10/12 15:11:42 bouyer Exp $	*/
 
 /*
  * Copyright (c) 1998 Robert Nordier
@@ -37,7 +37,7 @@
 static const char rcsid[] =
   "$FreeBSD: src/sbin/newfs_msdos/newfs_msdos.c,v 1.15 2000/10/10 01:49:37 wollman Exp $";
 #else
-__RCSID("$NetBSD: mkfs_msdos.c,v 1.10 2016/04/03 11:00:13 mlelstv Exp $");
+__RCSID("$NetBSD: mkfs_msdos.c,v 1.14.6.1 2019/10/12 15:11:42 bouyer Exp $");
 #endif
 #endif /* not lint */
 
@@ -235,7 +235,7 @@ static int got_siginfo = 0; /* received a SIGINFO */
 static int check_mounted(const char *, mode_t);
 #endif
 static int getstdfmt(const char *, struct bpb *);
-static int getbpbinfo(int, const char *, const char *, int, struct bpb *, int);
+static int getbpbinfo(int, const char *, const char *, int, struct bpb *, off_t);
 static void print_bpb(struct bpb *);
 static int ckgeom(const char *, u_int, const char *);
 static int oklabel(const char *);
@@ -264,7 +264,10 @@ mkfs_msdos(const char *fname, const char *dtype, const struct msdos_options *op)
     int ch, fd, fd1;
     struct msdos_options o = *op;
     int oflags = O_RDWR | O_CREAT;
+    bool bspf_is_calculated;
 
+again:
+    bspf_is_calculated = false;
     if (o.block_size && o.sectors_per_cluster) {
 	warnx("Cannot specify both block size and sectors per cluster");
 	return -1;
@@ -331,7 +334,7 @@ mkfs_msdos(const char *fname, const char *dtype, const struct msdos_options *op)
     if (!(o.floppy || (o.drive_heads && o.sectors_per_track &&
 	o.bytes_per_sector && o.size && o.hidden_sectors_set))) {
 	if (getbpbinfo(fd, fname, dtype, o.hidden_sectors_set, &bpb,
-	    o.create_size != 0) == -1)
+	    o.create_size) == -1)
 	    return -1;
 	bpb.bsec -= (o.offset / bpb.bps);
 	if (bpb.spc == 0) {     /* set defaults */
@@ -556,6 +559,7 @@ mkfs_msdos(const char *fname, const char *dtype, const struct msdos_options *op)
     x2 = howmany((RESFTE + MIN(x, maxcls(o.fat_type))) * (o.fat_type / BPN),
 		 bpb.bps * NPB);
     if (!bpb.bspf) {
+	bspf_is_calculated = true;
 	bpb.bspf = x2;
 	x1 += (bpb.bspf - 1) * bpb.nft;
     }
@@ -569,6 +573,11 @@ mkfs_msdos(const char *fname, const char *dtype, const struct msdos_options *op)
 	return -1;
     }
     if (cls < mincls(o.fat_type)) {
+	if (bspf_is_calculated && o.sectors_per_cluster == 0 && bpb.spc > 2) {
+		/* retry with smaller cluster size */
+		o.sectors_per_cluster = 2;
+		goto again;
+	}
 	warnx("%u clusters too few clusters for FAT%u, need %u", cls,
 	    o.fat_type, mincls(o.fat_type));
 	return -1;
@@ -621,9 +630,15 @@ mkfs_msdos(const char *fname, const char *dtype, const struct msdos_options *op)
 	printf("MBR type: %d\n", ch);
     print_bpb(&bpb);
     if (!o.no_create) {
-	gettimeofday(&tv, NULL);
-	now = tv.tv_sec;
-	tm = localtime(&now);
+	if (o.timestamp_set) {
+		tv.tv_sec = now = o.timestamp;
+		tv.tv_usec = 0;
+		tm = gmtime(&now);
+	} else {
+		gettimeofday(&tv, NULL);
+		now = tv.tv_sec;
+		tm = localtime(&now);
+	}
 	if (!(img = malloc(bpb.bps)))
 	    err(1, NULL);
 	dir = bpb.res + (bpb.spf ? bpb.spf : bpb.bspf) * bpb.nft;
@@ -811,7 +826,7 @@ getstdfmt(const char *fmt, struct bpb *bpb)
  */
 static int
 getbpbinfo(int fd, const char *fname, const char *dtype, int iflag,
-    struct bpb *bpb, int create)
+    struct bpb *bpb, off_t create_size)
 {
     const char *s1, *s2;
     int part;
@@ -829,26 +844,31 @@ getbpbinfo(int fd, const char *fname, const char *dtype, int iflag,
 
 #ifndef MAKEFS
     int maxpartitions = getmaxpartitions();
+    struct disk_geom geo;
+    struct dkwedge_info dkw;
 
     // XXX: Does not work with wedges
     if (s2 && *s2 >= 'a' && *s2 <= 'a' + maxpartitions - 1) {
 	part = *s2++ - 'a';
     }
 #endif
-    if (((part != -1) && ((!iflag && part != -1) || !bpb->bsec)) ||
-	!bpb->bps || !bpb->spt || !bpb->hds) {
-	u_int sector_size;
-	u_int nsectors;
-	u_int ntracks;
-	u_int size;
-#ifndef MAKEFS
-	struct disk_geom geo;
-	struct dkwedge_info dkw;
 
-	if (!create && getdiskinfo(fname, fd, NULL, &geo, &dkw) != -1) {
-	    sector_size = geo.dg_secsize = 512;
-	    nsectors = geo.dg_nsectors = 63;
-	    ntracks = geo.dg_ntracks = 255;
+    if (!(((part != -1) && ((!iflag && part != -1) || !bpb->bsec)) ||
+	!bpb->bps || !bpb->spt || !bpb->hds)) {
+	return 0;
+    }
+
+    u_int sector_size = 512;
+    u_int nsectors = 63;
+    u_int ntracks = 255;
+    u_int size;
+
+    if (create_size == 0) {
+#ifndef MAKEFS
+	if (getdiskinfo(fname, fd, NULL, &geo, &dkw) != -1) {
+	    sector_size = geo.dg_secsize;
+	    nsectors = geo.dg_nsectors;
+	    ntracks = geo.dg_ntracks;
 	    size = dkw.dkw_size;
 	} else
 #endif
@@ -859,39 +879,40 @@ getbpbinfo(int fd, const char *fname, const char *dtype, int iflag,
 		warnx("Can't get disk size for `%s'", fname);
 		return -1;
 	    }
-	    /* create a fake geometry for a file image */
-	    sector_size = 512;
-	    nsectors = 63;
-	    ntracks = 255;
 	    size = st.st_size / sector_size;
 	}
-	if (!bpb->bps) {
-	    if (ckgeom(fname, sector_size, "bytes/sector") == -1)
-		return -1;
-	    bpb->bps = sector_size;
-	}
-
-	if (nsectors > 63) {
-		/*
-		 * The kernel doesn't accept BPB with spt > 63.
-		 * (see sys/fs/msdosfs/msdosfs_vfsops.c:msdosfs_mountfs())
-		 * If values taken from disklabel don't match these
-		 * restrictions, use popular BIOS default values instead.
-		 */
-		nsectors = 63;
-	}
-	if (!bpb->spt) {
-	    if (ckgeom(fname, nsectors, "sectors/track") == -1)
-		return -1;
-	    bpb->spt = nsectors;
-	}
-	if (!bpb->hds)
-	    if (ckgeom(fname, ntracks, "drive heads") == -1)
-		return -1;
-	    bpb->hds = ntracks;
-	if (!bpb->bsec)
-	    bpb->bsec = size;
+    } else {
+	size = create_size / sector_size;
     }
+
+    if (!bpb->bps) {
+	if (ckgeom(fname, sector_size, "bytes/sector") == -1)
+	    return -1;
+	bpb->bps = sector_size;
+    }
+
+    if (nsectors > 63) {
+	    /*
+	     * The kernel doesn't accept BPB with spt > 63.
+	     * (see sys/fs/msdosfs/msdosfs_vfsops.c:msdosfs_mountfs())
+	     * If values taken from disklabel don't match these
+	     * restrictions, use popular BIOS default values instead.
+	     */
+	    nsectors = 63;
+    }
+    if (!bpb->spt) {
+	if (ckgeom(fname, nsectors, "sectors/track") == -1)
+	    return -1;
+	bpb->spt = nsectors;
+    }
+    if (!bpb->hds) {
+	if (ckgeom(fname, ntracks, "drive heads") == -1)
+	    return -1;
+	bpb->hds = ntracks;
+    }
+    if (!bpb->bsec)
+	bpb->bsec = size;
+
     return 0;
 }
 

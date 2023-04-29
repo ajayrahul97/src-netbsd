@@ -1,11 +1,12 @@
-#	$NetBSD: Makefile,v 1.3 2010/02/28 14:45:47 haad Exp $
+#	$NetBSD: Makefile,v 1.4.4.1 2019/09/27 09:18:37 martin Exp $
 
 .include "../../Makefile.zfs"
 
 PROG=	zfs
-MAN=	zfs.8
+MAN=	zfs.8 mount_zfs.8
 USETBL=	yes
 SRCS=	zfs_main.c zfs_iter.c
+LINKS=	${BINDIR}/zfs ${BINDIR}/mount_zfs
 
 DPADD=	${LIBZFS} ${LIBM} ${LIBNVPAIR} ${LIBUUTIL} ${LIBUTIL}
 
@@ -18,11 +19,15 @@ LDADD+=         -L${LIBUUTIL_OBJDIR} -luutil
 LIBZFS_OBJDIR!=  cd ${LIBZFS_SRCDIR} && ${PRINTOBJDIR}
 LDADD+=         -L${LIBZFS_OBJDIR} -lzfs
 
+LIBZFS_CORE_OBJDIR!=  cd ${LIBZFS_CORE_SRCDIR} && ${PRINTOBJDIR}
+LDADD+=         -L${LIBZFS_CORE_OBJDIR} -lzfs_core
+
 LIBUMEM_OBJDIR!=  cd ${LIBUMEM_SRCDIR} && ${PRINTOBJDIR}
 LDADD+=         -L${LIBUMEM_OBJDIR} -lumem
 
 LDADD+= -lm -lutil -lpthread
 
+.PATH: ${.CURDIR}
 .PATH: ${ZFSDIR}/dist/cmd/zfs
 
 .include <bsd.prog.mk>

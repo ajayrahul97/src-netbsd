@@ -1,4 +1,4 @@
-/*	$NetBSD: umidi.c,v 1.71 2016/07/07 06:55:42 msaitoh Exp $	*/
+/*	$NetBSD: umidi.c,v 1.78.2.1 2020/01/05 09:30:04 martin Exp $	*/
 
 /*
  * Copyright (c) 2001, 2012, 2014 The NetBSD Foundation, Inc.
@@ -32,7 +32,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: umidi.c,v 1.71 2016/07/07 06:55:42 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: umidi.c,v 1.78.2.1 2020/01/05 09:30:04 martin Exp $");
+
+#ifdef _KERNEL_OPT
+#include "opt_usb.h"
+#endif
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -53,7 +57,6 @@ __KERNEL_RCSID(0, "$NetBSD: umidi.c,v 1.71 2016/07/07 06:55:42 msaitoh Exp $");
 #include <dev/usb/usbdi.h>
 #include <dev/usb/usbdi_util.h>
 
-#include <dev/auconv.h>
 #include <dev/usb/usbdevs.h>
 #include <dev/usb/umidi_quirks.h>
 #include <dev/midi_if.h>
@@ -310,7 +313,7 @@ void umidi_attach(device_t, device_t, void *);
 void umidi_childdet(device_t, device_t);
 int umidi_detach(device_t, int);
 int umidi_activate(device_t, enum devact);
-extern struct cfdriver umidi_cd;
+
 CFATTACH_DECL2_NEW(umidi, sizeof(struct umidi_softc), umidi_match,
     umidi_attach, umidi_detach, umidi_activate, NULL, umidi_childdet);
 
@@ -411,7 +414,6 @@ out_free_endpoints:
 out:
 	aprint_error_dev(self, "disabled.\n");
 	sc->sc_dying = 1;
-	KERNEL_UNLOCK_ONE(curlwp);
 	return;
 }
 
@@ -458,7 +460,8 @@ umidi_detach(device_t self, int flags)
 	mutex_enter(&sc->sc_lock);
 	sc->sc_dying = 1;
 	if (--sc->sc_refcnt >= 0)
-		usb_detach_wait(sc->sc_dev, &sc->sc_detach_cv, &sc->sc_lock);
+		if (cv_timedwait(&sc->sc_detach_cv, &sc->sc_lock, hz * 60))
+			aprint_error_dev(self, ": didn't detach\n");
 	mutex_exit(&sc->sc_lock);
 
 	detach_all_mididevs(sc, flags);
@@ -545,7 +548,7 @@ umidi_close(void *addr)
 		close_in_jack(mididev->in_jack);
 
 	if (--sc->sc_refcnt < 0)
-		usb_detach_broadcast(sc->sc_dev, &sc->sc_detach_cv);
+		cv_broadcast(&sc->sc_detach_cv);
 
 	mididev->opened = 0;
 	mididev->closing = 0;
@@ -687,7 +690,7 @@ alloc_pipe(struct umidi_endpoint *ep)
 	if (err)
 		goto quit;
 	int error = usbd_create_xfer(ep->pipe, ep->buffer_size,
-	    USBD_SHORT_XFER_OK, 0, &ep->xfer);
+	    0, 0, &ep->xfer);
 	if (error) {
 		usbd_close_pipe(ep->pipe);
 		return USBD_NOMEM;
@@ -777,9 +780,6 @@ alloc_all_endpoints_fixed_ep(struct umidi_softc *sc)
 	sc->sc_in_num_endpoints = fp->num_in_ep;
 	sc->sc_endpoints_len = UMIDI_ENDPOINT_SIZE(sc);
 	sc->sc_endpoints = kmem_zalloc(sc->sc_endpoints_len, KM_SLEEP);
-	if (!sc->sc_endpoints)
-		return USBD_NOMEM;
-
 	sc->sc_out_ep = sc->sc_out_num_endpoints ? sc->sc_endpoints : NULL;
 	sc->sc_in_ep =
 	    sc->sc_in_num_endpoints ?
@@ -931,8 +931,6 @@ alloc_all_endpoints_yamaha(struct umidi_softc *sc)
 	}
 	sc->sc_endpoints_len = UMIDI_ENDPOINT_SIZE(sc);
 	sc->sc_endpoints = kmem_zalloc(sc->sc_endpoints_len, KM_SLEEP);
-	if (!sc->sc_endpoints)
-		return USBD_NOMEM;
 	if (sc->sc_out_num_endpoints) {
 		sc->sc_out_ep = sc->sc_endpoints;
 		sc->sc_out_ep->sc = sc;
@@ -969,9 +967,6 @@ alloc_all_endpoints_genuine(struct umidi_softc *sc)
 	num_ep = interface_desc->bNumEndpoints;
 	sc->sc_endpoints_len = sizeof(struct umidi_endpoint) * num_ep;
 	sc->sc_endpoints = p = kmem_zalloc(sc->sc_endpoints_len, KM_SLEEP);
-	if (!p)
-		return USBD_NOMEM;
-
 	sc->sc_out_num_jacks = sc->sc_in_num_jacks = 0;
 	sc->sc_out_num_endpoints = sc->sc_in_num_endpoints = 0;
 	epaddr = -1;
@@ -1232,7 +1227,7 @@ assign_all_jacks_automatically(struct umidi_softc *sc)
 
 	err =
 	    alloc_all_mididevs(sc,
-			       max(sc->sc_out_num_jacks, sc->sc_in_num_jacks));
+			       uimax(sc->sc_out_num_jacks, sc->sc_in_num_jacks));
 	if (err!=USBD_NORMAL_COMPLETION)
 		return err;
 
@@ -1452,9 +1447,6 @@ alloc_all_mididevs(struct umidi_softc *sc, int nmidi)
 {
 	sc->sc_num_mididevs = nmidi;
 	sc->sc_mididevs = kmem_zalloc(sizeof(*sc->sc_mididevs)*nmidi, KM_SLEEP);
-	if (!sc->sc_mididevs)
-		return USBD_NOMEM;
-
 	return USBD_NORMAL_COMPLETION;
 }
 
@@ -1793,7 +1785,7 @@ out_jack_output(struct umidi_jack *out_jack, u_char *src, int len, int cin)
 	}
 
 	if (--sc->sc_refcnt < 0)
-		usb_detach_broadcast(sc->sc_dev, &sc->sc_detach_cv);
+		cv_broadcast(&sc->sc_detach_cv);
 
 	return 0;
 }

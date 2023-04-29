@@ -1,4 +1,4 @@
-/*	$NetBSD: pmap.h,v 1.68 2016/07/11 16:15:35 matt Exp $	*/
+/*	$NetBSD: pmap.h,v 1.71 2019/04/01 06:12:51 msaitoh Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -77,6 +77,7 @@
 #ifdef _KERNEL_OPT
 #include "opt_multiprocessor.h"
 #include "opt_uvmhist.h"
+#include "opt_cputype.h"
 #endif
 
 #include <sys/evcnt.h>
@@ -116,7 +117,7 @@ typedef uint32_t pt_entry_t;
 #define PMAP_SEGTAB_ALIGN __aligned(sizeof(void *)*NSEGPG) __section(".data1")
 #endif   
 
-struct vm_physseg;
+#include <uvm/uvm_physseg.h>
 
 void	pmap_md_init(void);
 void	pmap_md_icache_sync_all(void);
@@ -125,7 +126,7 @@ void	pmap_md_page_syncicache(struct vm_page *, const kcpuset_t *);
 bool	pmap_md_vca_add(struct vm_page *, vaddr_t, pt_entry_t *);
 void	pmap_md_vca_clean(struct vm_page *, int);
 void	pmap_md_vca_remove(struct vm_page *, vaddr_t, bool, bool);
-bool	pmap_md_ok_to_steal_p(const struct vm_physseg *, size_t);
+bool	pmap_md_ok_to_steal_p(const uvm_physseg_t, size_t);
 bool	pmap_md_tlb_check_entry(void *, vaddr_t, tlb_asid_t, pt_entry_t);
 
 static inline bool
@@ -222,7 +223,7 @@ void	pmap_prefer(vaddr_t, vaddr_t *, vsize_t, int);
 
 #define	PMAP_ENABLE_PMAP_KMPAGE	/* enable the PMAP_KMPAGE flag */
 
-// these use register_t so we can pass XKPHYS adddresses to them on N32
+// these use register_t so we can pass XKPHYS addresses to them on N32
 bool	pmap_md_direct_mapped_vaddr_p(register_t);
 paddr_t	pmap_md_direct_mapped_vaddr_to_paddr(register_t);
 bool	pmap_md_io_vaddr_p(vaddr_t);
@@ -241,6 +242,17 @@ paddr_t	pmap_md_pool_vtophys(vaddr_t);
 vaddr_t	pmap_md_pool_phystov(paddr_t);
 #define	POOL_VTOPHYS(va)	pmap_md_pool_vtophys((vaddr_t)va)
 #define	POOL_PHYSTOV(pa)	pmap_md_pool_phystov((paddr_t)pa)
+
+#ifdef MIPS64_SB1
+/* uncached accesses are bad; all accesses should be cached (and coherent) */
+#undef PMAP_PAGEIDLEZERO
+#define	PMAP_PAGEIDLEZERO(pa)   (pmap_zero_page(pa), true)
+
+int sbmips_cca_for_pa(paddr_t);
+
+#undef PMAP_CCA_FOR_PA
+#define	PMAP_CCA_FOR_PA(pa)	sbmips_cca_for_pa(pa)
+#endif
 
 #endif	/* _KERNEL */
 #endif	/* _MIPS_PMAP_H_ */

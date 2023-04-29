@@ -1,4 +1,4 @@
-/* $NetBSD: locore.h,v 1.2 2015/03/28 16:13:56 matt Exp $ */
+/* $NetBSD: locore.h,v 1.4 2019/04/11 11:23:51 kamil Exp $ */
 /*-
  * Copyright (c) 2014 The NetBSD Foundation, Inc.
  * All rights reserved.
@@ -77,7 +77,7 @@ struct trapframe {
 #define tf_t6		tf_reg[_X_T6]
 };
 
-// For COMPAT_NETBDS32 coredumps
+// For COMPAT_NETBSD32 coredumps
 struct trapframe32 {
 	struct reg32 tf_regs;
 	register32_t tf_badaddr;	
@@ -138,27 +138,27 @@ fpu_load(void)
 }
 
 static inline void
-fpu_save(void)
+fpu_save(lwp_t *l)
 {
-	pcu_save(&pcu_fpu_ops);
+	pcu_save(&pcu_fpu_ops, l);
 }
 
 static inline void
-fpu_discard(void)
+fpu_discard(lwp_t *l)
 {
-	pcu_discard(&pcu_fpu_ops, false);
+	pcu_discard(&pcu_fpu_ops, l, false);
 }
 
 static inline void
-fpu_replace(void)
+fpu_replace(lwp_t *l)
 {
-	pcu_discard(&pcu_fpu_ops, true);
+	pcu_discard(&pcu_fpu_ops, l, true);
 }
 
 static inline bool
-fpu_valid_p(void)
+fpu_valid_p(lwp_t *l)
 {
-	return pcu_valid_p(&pcu_fpu_ops);
+	return pcu_valid_p(&pcu_fpu_ops, l);
 }
 
 void	__syncicache(const void *, size_t);

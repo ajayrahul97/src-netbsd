@@ -1,4 +1,4 @@
-/*	$NetBSD: vmparam.h,v 1.1 2014/09/19 17:36:26 matt Exp $	*/
+/*	$NetBSD: vmparam.h,v 1.5 2019/06/01 12:42:28 maxv Exp $	*/
 
 /*-
  * Copyright (c) 2014 The NetBSD Foundation, Inc.
@@ -42,10 +42,6 @@
  * Machine dependent VM constants for RISCV.
  */
 
-/*
- * We use a 8K page on RV64 and 4K on RV32 systems.
- * Override PAGE_* definitions to compile-time constants.
- */
 #define	PAGE_SHIFT	PGSHIFT
 #define	PAGE_SIZE	(1 << PAGE_SHIFT)
 #define	PAGE_MASK	(PAGE_SIZE - 1)
@@ -59,7 +55,7 @@
  * page-aligned.
  */
 #define	USRSTACK	(VM_MAXUSER_ADDRESS-PAGE_SIZE) /* Start of user stack */
-#define	USRSTACK32	((uint32_t)VM_MAXUSER32_ADDRESS-PAGE_SIZE)
+#define	USRSTACK32	((uint32_t)VM_MAXUSER_ADDRESS32-PAGE_SIZE)
 
 /*
  * Virtual memory related constants, all in bytes
@@ -107,29 +103,21 @@
 #define USRIOSIZE	(MAXBSIZE/PAGE_SIZE * 8)
 #endif
 
-// user/kernel map constants
-// These use negative addresses since RISCV addresses are signed.
+/*
+ * User/kernel map constants.
+ */
 #define VM_MIN_ADDRESS		((vaddr_t)0x00000000)
-#ifdef _LP64
-#define VM_MAXUSER_ADDRESS	((vaddr_t) 1L << 42)	/* 0x0000040000000000 */
-// For 64-bit kernels, we could, in theory, have 8TB (42 (13+29) bits worth)
-// of KVA space.  We need to divide that between KVA for direct-mapped memory,
-// space for I/O devices (someday), the kernel's mapped space.  For now, we are
-// going to restrict ourselves to use highest 8GB of KVA. The highest 2GB of
-// that KVA will be used to direct map memory.
-#define VM_MAX_KERNEL_ADDRESS	((vaddr_t) -PAGE_SIZE << 18)
-							/* 0xFFFFFFFF80000000 */
-#define VM_MIN_KERNEL_ADDRESS	((vaddr_t) -PAGE_SIZE << 20)
-							/* 0xFFFFFFFE00000000 */
-#else
+#ifdef _LP64	/* Sv39 */
+#define VM_MAXUSER_ADDRESS	((vaddr_t)0x0000004000000000 - 16 * PAGE_SIZE)
+#define VM_MIN_KERNEL_ADDRESS	((vaddr_t)0xFFFFFFC000000000)
+#define VM_MAX_KERNEL_ADDRESS	((vaddr_t)0xFFFFFFD000000000) /* MIN + 64GB */
+#else		/* Sv32 */
 #define VM_MAXUSER_ADDRESS	((vaddr_t)-0x7fffffff-1)/* 0xFFFFFFFF80000000 */
-// We reserve the bottom (nonnegative) address for user, then split the upper
-// 2GB into two 1GB, the lower for mapped KVA and the upper for direct-mapped.
 #define VM_MIN_KERNEL_ADDRESS	((vaddr_t)-0x7fffffff-1)/* 0xFFFFFFFF80000000 */
 #define VM_MAX_KERNEL_ADDRESS	((vaddr_t)-0x40000000)	/* 0xFFFFFFFFC0000000 */
 #endif
 #define VM_MAX_ADDRESS		VM_MAXUSER_ADDRESS
-#define VM_MAXUSER32_ADDRESS	((vaddr_t)(1UL << 31))/* 0x0000000080000000 */
+#define VM_MAXUSER_ADDRESS32	((vaddr_t)(1UL << 31))/* 0x0000000080000000 */
 
 /*
  * The address to which unspecified mapping requests default
@@ -137,12 +125,12 @@
 #define __USE_TOPDOWN_VM
 
 #define VM_DEFAULT_ADDRESS_TOPDOWN(da, sz) \
-    trunc_page(USRSTACK - MAXSSIZ - (sz))
+    trunc_page(USRSTACK - MAXSSIZ - (sz) - user_stack_guard_size)
 #define VM_DEFAULT_ADDRESS_BOTTOMUP(da, sz) \
     round_page((vaddr_t)(da) + (vsize_t)maxdmap)
 
 #define VM_DEFAULT_ADDRESS32_TOPDOWN(da, sz) \
-    trunc_page(USRSTACK32 - MAXSSIZ32 - (sz))
+    trunc_page(USRSTACK32 - MAXSSIZ32 - (sz) - user_stack_guard_size)
 #define VM_DEFAULT_ADDRESS32_BOTTOMUP(da, sz) \
     round_page((vaddr_t)(da) + (vsize_t)MAXDSIZ32)
 

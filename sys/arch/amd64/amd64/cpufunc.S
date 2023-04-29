@@ -1,6 +1,6 @@
-/*	$NetBSD: cpufunc.S,v 1.25 2014/02/12 23:24:09 dsl Exp $	*/
+/*	$NetBSD: cpufunc.S,v 1.43 2019/07/05 17:08:55 maxv Exp $	*/
 
-/*-
+/*
  * Copyright (c) 1998, 2007, 2008 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -41,6 +41,7 @@
 #include <machine/segments.h>
 
 #include "opt_xen.h"
+#include "opt_svs.h"
 
 #include "assym.h"
 
@@ -51,23 +52,39 @@
 ENTRY(x86_lfence)
 	lfence
 	ret
+END(x86_lfence)
 
 ENTRY(x86_sfence)
 	sfence
 	ret
+END(x86_sfence)
 
 ENTRY(x86_mfence)
 	mfence
 	ret
+END(x86_mfence)
 
-#ifndef XEN
+#ifndef XENPV
 ENTRY(invlpg)
+#ifdef SVS
+	movb	_C_LABEL(svs_pcid),%al
+	testb	%al,%al
+	jz	1f
+	pushq	%rdi
+	pushq	$PMAP_PCID_USER
+	movq	$INVPCID_ADDRESS,%rax
+	invpcid	(%rsp),%rax
+	addq	$16,%rsp
+1:	/* FALLTHROUGH */
+#endif
 	invlpg	(%rdi)
 	ret
+END(invlpg)
 
 ENTRY(lidt)
 	lidt	(%rdi)
 	ret
+END(lidt)
 
 ENTRY(lldt)
 	cmpl	%edi, CPUVAR(CURLDT)
@@ -77,51 +94,13 @@ ENTRY(lldt)
 	movl	%edi, CPUVAR(CURLDT)
 	lldt	%di
 	ret
+END(lldt)
 
 ENTRY(ltr)
 	ltr	%di
 	ret
-
-ENTRY(lcr0)
-	movq	%rdi, %cr0
-	ret
-
-ENTRY(rcr0)
-	movq	%cr0, %rax
-	ret
-
-ENTRY(lcr2)
-	movq	%rdi, %cr2
-	ret
-
-ENTRY(rcr2)
-	movq	%cr2, %rax
-	ret
-
-ENTRY(lcr3)
-	movq	%rdi, %cr3
-	ret
-
-ENTRY(rcr3)
-	movq	%cr3, %rax
-	ret
+END(ltr)
 #endif
-
-ENTRY(lcr4)
-	movq	%rdi, %cr4
-	ret
-
-ENTRY(rcr4)
-	movq	%cr4, %rax
-	ret
-
-ENTRY(lcr8)
-	movq	%rdi, %cr8
-	ret
-
-ENTRY(rcr8)
-	movq	%cr8, %rax
-	ret
 
 /*
  * Big hammer: flush all TLB entries, including ones from PTE's
@@ -141,43 +120,41 @@ ENTRY(rcr8)
  *
  * If PGE is not in use, we reload CR3.
  */
-#ifndef XEN
+#ifndef XENPV
 ENTRY(tlbflushg)
 	movq	%cr4, %rax
 	testq	$CR4_PGE, %rax
-	jz	1f
+	jz	tlbflush
 	movq	%rax, %rdx
 	andq	$~CR4_PGE, %rdx
 	movq	%rdx, %cr4
 	movq	%rax, %cr4
 	ret
+END(tlbflushg)
 
 ENTRY(tlbflush)
-1:
-	movq	%cr3, %rax
+#ifdef SVS
+	movb	_C_LABEL(svs_pcid),%al
+	testb	%al,%al
+	jz	1f
+	xorq	%rax,%rax
+	pushq	%rax
+	pushq	%rax
+	movq	$INVPCID_ALL_NONGLOBAL,%rax
+	invpcid	(%rsp),%rax
+	addq	$16,%rsp
+	ret
+#endif
+1:	movq	%cr3, %rax
 	movq	%rax, %cr3
 	ret
-
-ENTRY(ldr6)
-	movq	%rdi, %dr6
-	ret
-
-ENTRY(rdr6)
-	movq	%dr6, %rdi
-	ret
-
-ENTRY(x86_disable_intr)
-	cli
-	ret
-
-ENTRY(x86_enable_intr)
-	sti
-	ret
+END(tlbflush)
 
 ENTRY(x86_read_flags)
 	pushfq
 	popq	%rax
 	ret
+END(x86_read_flags)
 
 STRONG_ALIAS(x86_read_psl,x86_read_flags)
 
@@ -185,25 +162,10 @@ ENTRY(x86_write_flags)
 	pushq	%rdi
 	popfq
 	ret
+END(x86_write_flags)
 
 STRONG_ALIAS(x86_write_psl,x86_write_flags)
-#endif /* XEN */
-
-ENTRY(rdmsr)
-	movq	%rdi, %rcx
-	xorq	%rax, %rax
-	rdmsr
-	shlq	$32, %rdx
-	orq	%rdx, %rax
-	ret
-
-ENTRY(wrmsr)
-	movq	%rdi, %rcx
-	movq	%rsi, %rax
-	movq	%rsi, %rdx
-	shrq	$32, %rdx
-	wrmsr
-	ret
+#endif /* XENPV */
 
 ENTRY(rdmsr_locked)
 	movq	%rdi, %rcx
@@ -213,6 +175,7 @@ ENTRY(rdmsr_locked)
 	shlq	$32, %rdx
 	orq	%rdx, %rax
 	ret
+END(rdmsr_locked)
 
 ENTRY(wrmsr_locked)
 	movq	%rdi, %rcx
@@ -222,6 +185,7 @@ ENTRY(wrmsr_locked)
 	movl	$OPTERON_MSR_PASSCODE, %edi
 	wrmsr
 	ret
+END(wrmsr_locked)
 
 /*
  * Support for reading MSRs in the safe manner (returns EFAULT on fault)
@@ -243,36 +207,24 @@ ENTRY(rdmsr_safe)
 
 	movq	%rax, PCB_ONFAULT(%r8)
 	ret
-
-ENTRY(rdxcr)
-	movq	%rdi, %rcx
-	xgetbv
-	shlq	$32, %rdx
-	orq	%rdx, %rax
-	ret
-
-ENTRY(wrxcr)
-	movq	%rdi, %rcx
-	movq	%rsi, %rax
-	movq	%rsi, %rdx
-	shrq	$32, %rdx
-	xsetbv
-	ret
+END(rdmsr_safe)
 
 /*
  * MSR operations fault handler
  */
-NENTRY(msr_onfault)
+ENTRY(msr_onfault)
 	movq	CPUVAR(CURLWP), %r8
 	movq	L_PCB(%r8), %r8
 	movq	$0, PCB_ONFAULT(%r8)
 	movl	$EFAULT, %eax
 	ret
+END(msr_onfault)
 
-#ifndef XEN
+#ifndef XENPV
 ENTRY(wbinvd)
 	wbinvd
 	ret
+END(wbinvd)
 #endif
 
 ENTRY(cpu_counter)
@@ -282,19 +234,13 @@ ENTRY(cpu_counter)
 	orq	%rdx, %rax
 	addq	CPUVAR(CC_SKEW), %rax
 	ret
+END(cpu_counter)
 
 ENTRY(cpu_counter32)
 	rdtsc
 	addl	CPUVAR(CC_SKEW), %eax
 	ret
-
-ENTRY(rdpmc)
-	movq	%rdi, %rcx
-	xorq	%rax, %rax
-	rdpmc
-	shlq	$32, %rdx
-	orq	%rdx, %rax
-	ret
+END(cpu_counter32)
 
 ENTRY(breakpoint)
 	pushq	%rbp
@@ -302,28 +248,34 @@ ENTRY(breakpoint)
 	int	$0x03		/* paranoid, not 'int3' */
 	leave
 	ret
+END(breakpoint)
 
 ENTRY(x86_curcpu)
 	movq	%gs:(CPU_INFO_SELF), %rax
 	ret
+END(x86_curcpu)
 
 ENTRY(x86_curlwp)
 	movq	%gs:(CPU_INFO_CURLWP), %rax
 	ret
+END(x86_curlwp)
 
 ENTRY(cpu_set_curpri)
 	movl	%edi, %gs:(CPU_INFO_CURPRIORITY)
 	ret
+END(cpu_set_curpri)
 
 ENTRY(__byte_swap_u32_variable)
 	movl	%edi, %eax
 	bswapl	%eax
 	ret
+END(__byte_swap_u32_variable)
 
 ENTRY(__byte_swap_u16_variable)
 	movl	%edi, %eax
 	xchgb	%al, %ah
 	ret
+END(__byte_swap_u16_variable)
 
 /*
  * void lgdt(struct region_descriptor *rdp);
@@ -331,10 +283,9 @@ ENTRY(__byte_swap_u16_variable)
  * Load a new GDT pointer (and do any necessary cleanup).
  * XXX It's somewhat questionable whether reloading all the segment registers
  * is necessary, since the actual descriptor data is not changed except by
- * process creation and exit, both of which clean up via task switches.  OTOH,
- * this only happens at run time when the GDT is resized.
+ * process creation and exit, both of which clean up via task switches.
  */
-#ifndef XEN
+#ifndef XENPV
 ENTRY(lgdt)
 	/* Reload the descriptor table. */
 	movq	%rdi,%rax
@@ -342,19 +293,21 @@ ENTRY(lgdt)
 	/* Flush the prefetch q. */
 	jmp	1f
 	nop
-1:	/* Reload "stale" selectors. */
-#else /* XEN */
+1:	jmp	_C_LABEL(lgdt_finish)
+END(lgdt)
+#endif
+
 /*
  * void lgdt_finish(void);
  * Reload segments after a GDT change
  */
 ENTRY(lgdt_finish)
-#endif /* XEN */
 	movl	$GSEL(GDATA_SEL, SEL_KPL),%eax
 	movl	%eax,%ds
 	movl	%eax,%es
 	movl	%eax,%ss
-	/* FALLTHROUGH */
+	jmp	_C_LABEL(x86_flush)
+END(lgdt_finish)
 
 /*
  * void x86_flush()
@@ -366,6 +319,7 @@ ENTRY(x86_flush)
 	pushq	$GSEL(GCODE_SEL, SEL_KPL)
 	pushq	%rax
 	lretq
+END(x86_flush)
 
 /* Waits - set up stack frame. */
 ENTRY(x86_hlt)
@@ -374,6 +328,7 @@ ENTRY(x86_hlt)
 	hlt
 	leave
 	ret
+END(x86_hlt)
 
 /* Waits - set up stack frame. */
 ENTRY(x86_stihlt)
@@ -383,15 +338,17 @@ ENTRY(x86_stihlt)
 	hlt
 	leave
 	ret
+END(x86_stihlt)
 
 ENTRY(x86_monitor)
 	movq	%rdi, %rax
 	movq	%rsi, %rcx
 	monitor	%rax, %rcx, %rdx
 	ret
+END(x86_monitor)
 
 /* Waits - set up stack frame. */
-ENTRY(x86_mwait)  
+ENTRY(x86_mwait)
 	pushq	%rbp
 	movq	%rsp, %rbp
 	movq	%rdi, %rax
@@ -399,93 +356,40 @@ ENTRY(x86_mwait)
 	mwait	%rax, %rcx
 	leave
 	ret
-
-NENTRY(x86_pause)
-	pause
-	ret
-
-ENTRY(x86_cpuid2)
-	movq	%rbx, %r8
-	movq	%rdi, %rax
-	movq	%rsi, %rcx
-	movq	%rdx, %rsi
-	cpuid
-	movl	%eax, 0(%rsi)
-	movl	%ebx, 4(%rsi)
-	movl	%ecx, 8(%rsi)
-	movl	%edx, 12(%rsi)
-	movq	%r8, %rbx
-	ret
-
-ENTRY(x86_getss)
-	movl	%ss, %eax
-	ret
-
-ENTRY(fldcw)
-	fldcw	(%rdi)
-	ret
-
-ENTRY(fnclex)	
-	fnclex
-	ret
-
-ENTRY(fninit)
-	fninit
-	ret
+END(x86_mwait)
 
 ENTRY(fnsave)
 	fnsave	(%rdi)
 	ret
-
-ENTRY(fnstcw)
-	fnstcw	(%rdi)
-	ret
-
-ENTRY(fngetsw)
-	fnstsw	%ax
-	ret
-
-ENTRY(fnstsw)
-	fnstsw	(%rdi)
-	ret
-
-ENTRY(fp_divide_by_0)
-	fldz
-	fld1
-	fdiv	%st, %st(1)
-	fwait
-	ret
+END(fnsave)
 
 ENTRY(frstor)
 	frstor	(%rdi)
 	ret
-
-ENTRY(fwait)
-	fwait
-	ret
-
-ENTRY(clts)
-	clts
-	ret
+END(frstor)
 
 ENTRY(stts)
 	movq	%cr0, %rax
 	orq	$CR0_TS, %rax
 	movq	%rax, %cr0
 	ret
+END(stts)
 
 ENTRY(fxsave)
 	fxsave	(%rdi)
 	ret
+END(fxsave)
 
 ENTRY(fxrstor)
 	fxrstor	(%rdi)
 	ret
+END(fxrstor)
 
 ENTRY(fldummy)
 	ffree	%st(7)
 	fldz
 	ret
+END(fldummy)
 
 ENTRY(xsave)
 	movq	%rsi, %rax
@@ -493,6 +397,7 @@ ENTRY(xsave)
 	shrq	$32, %rdx
 	xsave	(%rdi)
 	ret
+END(xsave)
 
 ENTRY(xsaveopt)
 	movq	%rsi, %rax
@@ -500,6 +405,7 @@ ENTRY(xsaveopt)
 	shrq	$32, %rdx
 	xsaveopt	(%rdi)
 	ret
+END(xsaveopt)
 
 ENTRY(xrstor)
 	movq	%rsi, %rax
@@ -507,20 +413,14 @@ ENTRY(xrstor)
 	shrq	$32, %rdx
 	xrstor	(%rdi)
 	ret
-
-ENTRY(x86_stmxcsr)
-	stmxcsr	(%rdi)
-	ret
-
-ENTRY(x86_ldmxcsr)
-	ldmxcsr	(%rdi)
-	ret
+END(xrstor)
 
 ENTRY(inb)
 	movq	%rdi, %rdx
 	xorq	%rax, %rax
 	inb	%dx, %al
 	ret
+END(inb)
 
 ENTRY(insb)
 	movl	%edx, %ecx
@@ -529,12 +429,14 @@ ENTRY(insb)
 	rep
 	insb
 	ret
+END(insb)
 
 ENTRY(inw)
 	movq	%rdi, %rdx
 	xorq	%rax, %rax
 	inw	%dx, %ax
 	ret
+END(inw)
 
 ENTRY(insw)
 	movl	%edx, %ecx
@@ -543,12 +445,14 @@ ENTRY(insw)
 	rep
 	insw
 	ret
+END(insw)
 
 ENTRY(inl)
 	movq	%rdi, %rdx
 	xorq	%rax, %rax
 	inl	%dx, %eax
 	ret
+END(inl)
 
 ENTRY(insl)
 	movl	%edx, %ecx
@@ -557,12 +461,14 @@ ENTRY(insl)
 	rep
 	insl
 	ret
+END(insl)
 
 ENTRY(outb)
 	movq	%rdi, %rdx
 	movq	%rsi, %rax
 	outb	%al, %dx
 	ret
+END(outb)
 
 ENTRY(outsb)
 	movl	%edx, %ecx
@@ -570,12 +476,14 @@ ENTRY(outsb)
 	rep
 	outsb
 	ret
+END(outsb)
 
 ENTRY(outw)
 	movq	%rdi, %rdx
 	movq	%rsi, %rax
 	outw	%ax, %dx
 	ret
+END(outw)
 
 ENTRY(outsw)
 	movl	%edx, %ecx
@@ -583,12 +491,14 @@ ENTRY(outsw)
 	rep
 	outsw
 	ret
+END(outsw)
 
 ENTRY(outl)
 	movq	%rdi, %rdx
 	movq	%rsi, %rax
 	outl	%eax, %dx
 	ret
+END(outl)
 
 ENTRY(outsl)
 	movl	%edx, %ecx
@@ -596,11 +506,9 @@ ENTRY(outsl)
 	rep
 	outsl
 	ret
+END(outsl)
 
-ENTRY(setfs)
-	movw	%di, %fs
-	ret
-
+#ifndef XENPV
 ENTRY(setusergs)
 	CLI(ax)
 	swapgs
@@ -608,3 +516,5 @@ ENTRY(setusergs)
 	swapgs
 	STI(ax)
 	ret
+END(setusergs)
+#endif

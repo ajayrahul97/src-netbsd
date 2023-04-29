@@ -1,5 +1,5 @@
 #! /usr/bin/awk -f
-#	$NetBSD: devlist2h.awk,v 1.7 2008/05/02 18:11:05 martin Exp $
+#	$NetBSD: devlist2h.awk,v 1.9.4.1 2019/12/09 12:49:39 martin Exp $
 #
 # Copyright (c) 1998 The NetBSD Foundation, Inc.
 # All rights reserved.
@@ -41,9 +41,8 @@
 #    documentation and/or other materials provided with the distribution.
 # 3. All advertising materials mentioning features or use of this software
 #    must display the following acknowledgement:
-#      This model includes software developed by Christopher G. Demetriou.
-#      This model includes software developed by Christos Zoulas
-# 4. The name of the author(s) may not be used to endorse or promote models
+#      This product includes software developed by Christopher G. Demetriou.
+# 4. The name of the author(s) may not be used to endorse or promote products
 #    derived from this software without specific prior written permission
 #
 # THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
@@ -143,6 +142,11 @@ NF > 0 && $1 == "model" {
 	    models[nmodels, 4]) > hfile
 
 	if (!firstdone) {
+		printf("struct mii_knowndev {\n") > dfile
+		printf("	int oui;\n") > dfile
+		printf("	int model;\n") > dfile
+		printf("	const char *descr;\n") > dfile
+		printf("};\n") > dfile
 		printf("struct mii_knowndev mii_knowndevs[] = {\n") > dfile
 		firstdone = 1
 	}

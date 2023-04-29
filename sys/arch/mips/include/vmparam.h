@@ -1,4 +1,4 @@
-/*	$NetBSD: vmparam.h,v 1.55 2016/07/11 16:15:35 matt Exp $	*/
+/*	$NetBSD: vmparam.h,v 1.62 2019/05/05 18:13:16 christos Exp $	*/
 
 /*
  * Copyright (c) 1988 University of Utah.
@@ -50,10 +50,6 @@
 /*
  * Machine dependent VM constants for MIPS.
  */
-#if !defined(_RUMPKERNEL) && (defined(MODULAR) || defined(_MODULE))
-#define MAX_PAGE_SIZE	16384
-#define MIN_PAGE_SIZE	4096
-#endif
 
 /*
  * We normally use a 4K page but may use 16K on MIPS systems.
@@ -70,6 +66,12 @@
 #define	PAGE_SIZE	(1 << PAGE_SHIFT)
 #define	PAGE_MASK	(PAGE_SIZE - 1)
 
+#define MIN_PAGE_SHIFT	12
+#define	MAX_PAGE_SHIFT	14
+
+#define MAX_PAGE_SIZE	(1 << MAX_PAGE_SHIFT)
+#define MIN_PAGE_SIZE	(1 << MIN_PAGE_SHIFT)
+
 /*
  * USRSTACK is the top (end) of the user stack.
  *
@@ -79,7 +81,7 @@
  * in an instruction.
  */
 #define	USRSTACK	(VM_MAXUSER_ADDRESS-0x8000) /* Start of user stack */
-#define	USRSTACK32	((uint32_t)VM_MAXUSER32_ADDRESS-0x8000)
+#define	USRSTACK32	((uint32_t)VM_MAXUSER_ADDRESS32-0x8000)
 
 /*
  * Virtual memory related constants, all in bytes
@@ -158,14 +160,13 @@
  */
 #define VM_MIN_ADDRESS		((vaddr_t)0x00000000)
 #ifdef _LP64
-#define MIPS_VM_MAXUSER_ADDRESS	((vaddr_t) 1L << (4*PGSHIFT-8))
+#define MIPS_VM_MAXUSER_ADDRESS	((vaddr_t) 1L << 40)
 #ifdef ENABLE_MIPS_16KB_PAGE
 #define VM_MAXUSER_ADDRESS	mips_vm_maxuser_address
 #else
 #define VM_MAXUSER_ADDRESS	MIPS_VM_MAXUSER_ADDRESS
 #endif
-							/* 0x0000010000000000 */
-#define VM_MAX_ADDRESS		VM_MAXUSER_ADDRESS
+#define VM_MAX_ADDRESS		VM_MAXUSER_ADDRESS	/* 0x0000010000000000 */
 #define VM_MIN_KERNEL_ADDRESS	((vaddr_t) 3L << 62)	/* 0xC000000000000000 */
 #define VM_MAX_KERNEL_ADDRESS	((vaddr_t) -1L << 31)	/* 0xFFFFFFFF80000000 */
 #else
@@ -178,7 +179,7 @@
 #define VM_MAX_KERNEL_ADDRESS	((vaddr_t)-0x00004000)	/* 0xFFFFFFFFFFFFC000 */
 #endif
 #endif
-#define VM_MAXUSER32_ADDRESS	((vaddr_t)(1UL << 31))/* 0x0000000080000000 */
+#define VM_MAXUSER_ADDRESS32	((vaddr_t)(1UL << 31))	/* 0x0000000080000000 */
 
 /*
  * The address to which unspecified mapping requests default
@@ -186,12 +187,12 @@
 #define __USE_TOPDOWN_VM
 
 #define VM_DEFAULT_ADDRESS_TOPDOWN(da, sz) \
-    trunc_page(USRSTACK - MAXSSIZ - (sz))
+    trunc_page(USRSTACK - MAXSSIZ - (sz) - user_stack_guard_size)
 #define VM_DEFAULT_ADDRESS_BOTTOMUP(da, sz) \
     round_page((vaddr_t)(da) + (vsize_t)maxdmap)
 
 #define VM_DEFAULT_ADDRESS32_TOPDOWN(da, sz) \
-    trunc_page(USRSTACK32 - MAXSSIZ32 - (sz))
+    trunc_page(USRSTACK32 - MAXSSIZ32 - (sz) - user_stack_guard_size)
 #define VM_DEFAULT_ADDRESS32_BOTTOMUP(da, sz) \
     round_page((vaddr_t)(da) + (vsize_t)MAXDSIZ32)
 
@@ -209,8 +210,6 @@
 #endif
 
 #ifdef _KERNEL
-#define	UVM_KM_VMFREELIST	mips_poolpage_vmfreelist
-extern int mips_poolpage_vmfreelist;
 #ifdef ENABLE_MIPS_16KB_PAGE
 extern vaddr_t mips_vm_maxuser_address;
 #endif

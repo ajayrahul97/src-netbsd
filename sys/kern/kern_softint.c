@@ -1,7 +1,7 @@
-/*	$NetBSD: kern_softint.c,v 1.43 2016/07/04 04:20:14 knakahara Exp $	*/
+/*	$NetBSD: kern_softint.c,v 1.47.2.1 2019/12/12 20:43:08 martin Exp $	*/
 
 /*-
- * Copyright (c) 2007, 2008 The NetBSD Foundation, Inc.
+ * Copyright (c) 2007, 2008, 2019 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
  * This code is derived from software contributed to The NetBSD Foundation
@@ -170,13 +170,14 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: kern_softint.c,v 1.43 2016/07/04 04:20:14 knakahara Exp $");
+__KERNEL_RCSID(0, "$NetBSD: kern_softint.c,v 1.47.2.1 2019/12/12 20:43:08 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/proc.h>
 #include <sys/intr.h>
 #include <sys/ipi.h>
 #include <sys/mutex.h>
+#include <sys/kernel.h>
 #include <sys/kthread.h>
 #include <sys/evcnt.h>
 #include <sys/cpu.h>
@@ -217,7 +218,7 @@ typedef struct softcpu {
 
 static void	softint_thread(void *);
 
-u_int		softint_bytes = 8192;
+u_int		softint_bytes = 32768;
 u_int		softint_timing;
 static u_int	softint_max;
 static kmutex_t	softint_lock;
@@ -430,8 +431,10 @@ softint_disestablish(void *arg)
 	 * it again.  So, we are only looking for handler records with
 	 * SOFTINT_ACTIVE already set.
 	 */
-	where = xc_broadcast(0, (xcfunc_t)nullop, NULL, NULL);
-	xc_wait(where);
+	if (__predict_true(mp_online)) {
+		where = xc_broadcast(0, (xcfunc_t)nullop, NULL, NULL);
+		xc_wait(where);
+	}
 
 	for (;;) {
 		/* Collect flag values from each CPU. */
@@ -592,11 +595,16 @@ softint_execute(softint_t *si, lwp_t *l, int s)
 		KASSERTMSG(curcpu()->ci_mtx_count == 0,
 		    "%s: ci_mtx_count (%d) != 0, sh_func %p\n",
 		    __func__, curcpu()->ci_mtx_count, sh->sh_func);
+		/* Diagnostic: check that psrefs have not leaked. */
+		KASSERTMSG(l->l_psrefs == 0, "%s: l_psrefs=%d, sh_func=%p\n",
+		    __func__, l->l_psrefs, sh->sh_func);
 
 		(void)splhigh();
 		KASSERT((sh->sh_flags & SOFTINT_ACTIVE) != 0);
 		sh->sh_flags ^= SOFTINT_ACTIVE;
 	}
+
+	PSREF_DEBUG_BARRIER();
 
 	if (havelock) {
 		KERNEL_UNLOCK_ONE(l);
@@ -860,14 +868,16 @@ softint_dispatch(lwp_t *pinned, int s)
 	timing = (softint_timing ? LP_TIMEINTR : 0);
 	l->l_switchto = pinned;
 	l->l_stat = LSONPROC;
-	l->l_pflag |= (LP_RUNNING | timing);
 
 	/*
 	 * Dispatch the interrupt.  If softints are being timed, charge
 	 * for it.
 	 */
-	if (timing)
+	if (timing) {
 		binuptime(&l->l_stime);
+		membar_producer();	/* for calcru */
+	}
+	l->l_pflag |= (LP_RUNNING | timing);
 	softint_execute(si, l, s);
 	if (timing) {
 		binuptime(&now);

@@ -1,4 +1,4 @@
-/*      $NetBSD: raidctl.c,v 1.65 2016/01/06 22:57:44 wiz Exp $   */
+/*      $NetBSD: raidctl.c,v 1.69 2019/02/06 22:38:10 oster Exp $   */
 
 /*-
  * Copyright (c) 1996, 1997, 1998 The NetBSD Foundation, Inc.
@@ -39,7 +39,7 @@
 #include <sys/cdefs.h>
 
 #ifndef lint
-__RCSID("$NetBSD: raidctl.c,v 1.65 2016/01/06 22:57:44 wiz Exp $");
+__RCSID("$NetBSD: raidctl.c,v 1.69 2019/02/06 22:38:10 oster Exp $");
 #endif
 
 
@@ -83,7 +83,7 @@ static  void check_status(int,int);
 static  void check_parity(int,int, char *);
 static  void do_meter(int, u_long);
 static  void get_bar(char *, double, int);
-static  void get_time_string(char *, int);
+static  void get_time_string(char *, size_t, int);
 static  void rf_output_pmstat(int, int);
 static  void rf_pm_configure(int, int, char *, int[]);
 static  unsigned int xstrtouint(const char *);
@@ -615,9 +615,13 @@ rf_output_configuration(int fd, const char *name)
 	printf("\n");
 	do_ioctl(fd, RAIDFRAME_GET_INFO, &cfg_ptr, "RAIDFRAME_GET_INFO");
 
+	/*
+	 * After NetBSD 9, convert this to not output the numRow's value,
+	 * which is no longer required or ever used.
+	 */
 	printf("START array\n");
 	printf("# numRow numCol numSpare\n");
-	printf("%d %d %d\n", device_config.rows, device_config.cols,
+	printf("%d %d %d\n", 1, device_config.cols,
 	    device_config.nspares);
 	printf("\n");
 
@@ -649,7 +653,7 @@ rf_output_configuration(int fd, const char *name)
 	component_label.row = component_num / num_cols;
 	component_label.column = component_num % num_cols;
 	label_ptr = &component_label;
-	do_ioctl(fd, RAIDFRAME_GET_COMPONENT_LABEL, &label_ptr,
+	do_ioctl(fd, RAIDFRAME_GET_COMPONENT_LABEL, label_ptr,
 		  "RAIDFRAME_GET_COMPONENT_LABEL");
 
 	printf("START layout\n");
@@ -719,7 +723,6 @@ rf_fail_disk(int fd, char *component_to_fail, int do_recon)
 
 	get_component_number(fd, component_to_fail, &component_num, &num_cols);
 
-	recon_request.row = component_num / num_cols;
 	recon_request.col = component_num % num_cols;
 	if (do_recon) {
 		recon_request.flags = RF_FDFLAGS_RECON;
@@ -750,7 +753,7 @@ get_component_label(int fd, char *component)
 	component_label.column = component_num % num_cols;
 
 	label_ptr = &component_label;
-	do_ioctl( fd, RAIDFRAME_GET_COMPONENT_LABEL, &label_ptr,
+	do_ioctl( fd, RAIDFRAME_GET_COMPONENT_LABEL, label_ptr,
 		  "RAIDFRAME_GET_COMPONENT_LABEL");
 
 	printf("Component label for %s:\n",component);
@@ -820,7 +823,7 @@ init_component_labels(int fd, int serial_number)
 	component_label.status = 0;
 	
 	do_ioctl( fd, RAIDFRAME_INIT_LABELS, &component_label,
-		  "RAIDFRAME_SET_COMPONENT_LABEL");
+		  "RAIDFRAME_INIT_LABELS");
 }
 
 static void
@@ -1024,7 +1027,7 @@ do_meter(int fd, u_long option)
 	pInfoPtr=&progressInfo;
 
 	percent_done = 0;
-	do_ioctl(fd, option, &pInfoPtr, "");
+	do_ioctl(fd, option, pInfoPtr, "");
 	start_value = progressInfo.completed;
 	current_time = start_time;
 	simple_eta = 0;
@@ -1073,7 +1076,7 @@ do_meter(int fd, u_long option)
 			last_eta = simple_eta;
 		}
 
-		get_time_string(eta_buffer, simple_eta);
+		get_time_string(eta_buffer, sizeof eta_buffer, simple_eta);
 
 		fprintf(stdout,"\r%3d%% |%s| ETA: %s %c",
 			percent_done,bar_buffer,eta_buffer,tbits[tbit_value]);
@@ -1087,7 +1090,7 @@ do_meter(int fd, u_long option)
 		if (gettimeofday(&current_time,NULL) == -1)
 			err(1, "gettimeofday failed!?!?");
 
-		do_ioctl( fd, option, &pInfoPtr, "");
+		do_ioctl( fd, option, pInfoPtr, "");
 		
 
 	}
@@ -1123,32 +1126,42 @@ get_bar(char *string, double percent, int max_strlen)
 }
 
 static void
-get_time_string(char *string, int simple_time)
+get_time_string(char *string, size_t len, int simple_time)
 {
 	int minutes, seconds, hours;
-	char hours_buffer[5];
+	char hours_buffer[8];
 	char minutes_buffer[5];
 	char seconds_buffer[5];
 
 	if (simple_time >= 0) {
 
-		minutes = (int) simple_time / 60;
-		seconds = ((int)simple_time - 60*minutes);
+		minutes = simple_time / 60;
+		seconds = simple_time - 60*minutes;
 		hours = minutes / 60;
 		minutes = minutes - 60*hours;
+#if defined(__GNUC__)
+		/*
+		 * snprintf() truncation checker fails to detect that seconds
+		 * and minutes will be 0-59 range.
+		 */
+		if (minutes < 0 || minutes > 60)
+			minutes = 60;
+		if (seconds < 0 || seconds > 60)
+			seconds = 60;
+#endif
 		
 		if (hours > 0) {
-			snprintf(hours_buffer,5,"%02d:",hours);
+			snprintf(hours_buffer,sizeof hours_buffer,"%02d:",hours);
 		} else {
-			snprintf(hours_buffer,5,"   ");
+			snprintf(hours_buffer,sizeof hours_buffer,"   ");
 		}
 		
-		snprintf(minutes_buffer,5,"%02d:",minutes);
-		snprintf(seconds_buffer,5,"%02d",seconds);
-		snprintf(string,1024,"%s%s%s",
+		snprintf(minutes_buffer,sizeof minutes_buffer,"%02d:",minutes);
+		snprintf(seconds_buffer,sizeof seconds_buffer,"%02d",seconds);
+		snprintf(string,len,"%s%s%s",
 			 hours_buffer, minutes_buffer, seconds_buffer);
 	} else {
-		snprintf(string,1024,"   --:--");
+		snprintf(string,len,"   --:--");
 	}
 	
 }

@@ -1,4 +1,4 @@
-/*	$NetBSD: subr_cprng.c,v 1.27 2015/04/13 22:43:41 riastradh Exp $ */
+/*	$NetBSD: subr_cprng.c,v 1.30.2.2 2019/11/25 17:00:22 martin Exp $ */
 
 /*-
  * Copyright (c) 2011-2013 The NetBSD Foundation, Inc.
@@ -30,7 +30,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: subr_cprng.c,v 1.27 2015/04/13 22:43:41 riastradh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: subr_cprng.c,v 1.30.2.2 2019/11/25 17:00:22 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -53,7 +53,7 @@ __KERNEL_RCSID(0, "$NetBSD: subr_cprng.c,v 1.27 2015/04/13 22:43:41 riastradh Ex
 #include <sys/rngtest.h>
 #endif
 
-#include <crypto/nist_ctr_drbg/nist_ctr_drbg.h>
+#include <crypto/nist_hash_drbg/nist_hash_drbg.h>
 
 #if defined(__HAVE_CPU_COUNTER)
 #include <machine/cpu_counter.h>
@@ -77,7 +77,8 @@ cprng_init(void)
 {
 	static struct sysctllog *random_sysctllog;
 
-	nist_ctr_initialize();
+	if (nist_hash_drbg_initialize() != 0)
+		panic("NIST Hash_DRBG failed self-test");
 
 	sysctl_createv(&random_sysctllog, 0, NULL, NULL,
 		       CTLFLAG_PERMANENT,
@@ -120,7 +121,7 @@ struct cprng_strong {
 	struct selinfo	cs_selq;
 	struct rndsink	*cs_rndsink;
 	bool		cs_ready;
-	NIST_CTR_DRBG	cs_drbg;
+	NIST_HASH_DRBG	cs_drbg;
 
 	/* XXX Kludge for /dev/random `information-theoretic' properties.   */
 	unsigned int	cs_remaining;
@@ -140,28 +141,29 @@ cprng_strong_create(const char *name, int ipl, int flags)
 	KASSERT(ipl != IPL_SCHED && ipl != IPL_HIGH);
 
 	/* Initialize the easy fields.  */
+	memset(cprng->cs_name, 0, sizeof(cprng->cs_name));
 	(void)strlcpy(cprng->cs_name, name, sizeof(cprng->cs_name));
 	cprng->cs_flags = flags;
 	mutex_init(&cprng->cs_lock, MUTEX_DEFAULT, ipl);
 	cv_init(&cprng->cs_cv, cprng->cs_name);
 	selinit(&cprng->cs_selq);
-	cprng->cs_rndsink = rndsink_create(NIST_BLOCK_KEYLEN_BYTES,
+	cprng->cs_rndsink = rndsink_create(NIST_HASH_DRBG_MIN_SEEDLEN_BYTES,
 	    &cprng_strong_rndsink_callback, cprng);
 
 	/* Get some initial entropy.  Record whether it is full entropy.  */
-	uint8_t seed[NIST_BLOCK_KEYLEN_BYTES];
+	uint8_t seed[NIST_HASH_DRBG_MIN_SEEDLEN_BYTES];
 	mutex_enter(&cprng->cs_lock);
 	cprng->cs_ready = rndsink_request(cprng->cs_rndsink, seed,
 	    sizeof(seed));
-	if (nist_ctr_drbg_instantiate(&cprng->cs_drbg, seed, sizeof(seed),
+	if (nist_hash_drbg_instantiate(&cprng->cs_drbg, seed, sizeof(seed),
 		&cc, sizeof(cc), cprng->cs_name, sizeof(cprng->cs_name)))
-		/* XXX Fix nist_ctr_drbg API so this can't happen.  */
-		panic("cprng %s: NIST CTR_DRBG instantiation failed",
+		/* XXX Fix nist_hash_drbg API so this can't happen.  */
+		panic("cprng %s: NIST Hash_DRBG instantiation failed",
 		    cprng->cs_name);
 	explicit_memset(seed, 0, sizeof(seed));
 
 	if (ISSET(flags, CPRNG_HARD))
-		cprng->cs_remaining = NIST_BLOCK_KEYLEN_BYTES;
+		cprng->cs_remaining = NIST_HASH_DRBG_MIN_SEEDLEN_BYTES;
 	else
 		cprng->cs_remaining = 0;
 
@@ -187,7 +189,7 @@ cprng_strong_destroy(struct cprng_strong *cprng)
 	KASSERT(!select_has_waiters(&cprng->cs_selq)) /* XXX ? */
 #endif
 
-	nist_ctr_drbg_destroy(&cprng->cs_drbg);
+	nist_hash_drbg_destroy(&cprng->cs_drbg);
 	seldestroy(&cprng->cs_selq);
 	cv_destroy(&cprng->cs_cv);
 	mutex_destroy(&cprng->cs_lock);
@@ -232,18 +234,20 @@ cprng_strong(struct cprng_strong *cprng, void *buffer, size_t bytes, int flags)
 	 */
 	if (__predict_false(ISSET(cprng->cs_flags, CPRNG_HARD))) {
 		KASSERT(0 < cprng->cs_remaining);
-		KASSERT(cprng->cs_remaining <= NIST_BLOCK_KEYLEN_BYTES);
+		KASSERT(cprng->cs_remaining <=
+		    NIST_HASH_DRBG_MIN_SEEDLEN_BYTES);
 		if (bytes < cprng->cs_remaining) {
 			cprng->cs_remaining -= bytes;
 		} else {
 			bytes = cprng->cs_remaining;
-			cprng->cs_remaining = NIST_BLOCK_KEYLEN_BYTES;
+			cprng->cs_remaining = NIST_HASH_DRBG_MIN_SEEDLEN_BYTES;
 			cprng->cs_ready = false;
 			rndsink_schedule(cprng->cs_rndsink);
 		}
-		KASSERT(bytes <= NIST_BLOCK_KEYLEN_BYTES);
+		KASSERT(bytes <= NIST_HASH_DRBG_MIN_SEEDLEN_BYTES);
 		KASSERT(0 < cprng->cs_remaining);
-		KASSERT(cprng->cs_remaining <= NIST_BLOCK_KEYLEN_BYTES);
+		KASSERT(cprng->cs_remaining <=
+		    NIST_HASH_DRBG_MIN_SEEDLEN_BYTES);
 	}
 
 	cprng_strong_generate(cprng, buffer, bytes);
@@ -251,31 +255,6 @@ cprng_strong(struct cprng_strong *cprng, void *buffer, size_t bytes, int flags)
 
 out:	mutex_exit(&cprng->cs_lock);
 	return result;
-}
-
-static void	filt_cprng_detach(struct knote *);
-static int	filt_cprng_event(struct knote *, long);
-
-static const struct filterops cprng_filtops =
-	{ 1, NULL, filt_cprng_detach, filt_cprng_event };
-
-int
-cprng_strong_kqfilter(struct cprng_strong *cprng, struct knote *kn)
-{
-
-	switch (kn->kn_filter) {
-	case EVFILT_READ:
-		kn->kn_fop = &cprng_filtops;
-		kn->kn_hook = cprng;
-		mutex_enter(&cprng->cs_lock);
-		SLIST_INSERT_HEAD(&cprng->cs_selq.sel_klist, kn, kn_selnext);
-		mutex_exit(&cprng->cs_lock);
-		return 0;
-
-	case EVFILT_WRITE:
-	default:
-		return EINVAL;
-	}
 }
 
 static void
@@ -289,7 +268,7 @@ filt_cprng_detach(struct knote *kn)
 }
 
 static int
-filt_cprng_event(struct knote *kn, long hint)
+filt_cprng_read_event(struct knote *kn, long hint)
 {
 	struct cprng_strong *const cprng = kn->kn_hook;
 	int ret;
@@ -310,6 +289,62 @@ filt_cprng_event(struct knote *kn, long hint)
 		mutex_exit(&cprng->cs_lock);
 
 	return ret;
+}
+
+static int
+filt_cprng_write_event(struct knote *kn, long hint)
+{
+	struct cprng_strong *const cprng = kn->kn_hook;
+
+	if (hint == NOTE_SUBMIT)
+		KASSERT(mutex_owned(&cprng->cs_lock));
+	else
+		mutex_enter(&cprng->cs_lock);
+
+	kn->kn_data = 0;
+
+	if (hint == NOTE_SUBMIT)
+		KASSERT(mutex_owned(&cprng->cs_lock));
+	else
+		mutex_exit(&cprng->cs_lock);
+
+	return 0;
+}
+
+static const struct filterops cprng_read_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_cprng_detach,
+	.f_event = filt_cprng_read_event,
+};
+
+static const struct filterops cprng_write_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_cprng_detach,
+	.f_event = filt_cprng_write_event,
+};
+
+int
+cprng_strong_kqfilter(struct cprng_strong *cprng, struct knote *kn)
+{
+
+	switch (kn->kn_filter) {
+	case EVFILT_READ:
+		kn->kn_fop = &cprng_read_filtops;
+		break;
+	case EVFILT_WRITE:
+		kn->kn_fop = &cprng_write_filtops;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	kn->kn_hook = cprng;
+	mutex_enter(&cprng->cs_lock);
+	SLIST_INSERT_HEAD(&cprng->cs_selq.sel_klist, kn, kn_selnext);
+	mutex_exit(&cprng->cs_lock);
+	return 0;
 }
 
 int
@@ -333,22 +368,22 @@ cprng_strong_poll(struct cprng_strong *cprng, int events)
 }
 
 /*
- * XXX Move nist_ctr_drbg_reseed_advised_p and
- * nist_ctr_drbg_reseed_needed_p into the nist_ctr_drbg API and make
- * the NIST_CTR_DRBG structure opaque.
+ * XXX Move nist_hash_drbg_reseed_advised_p and
+ * nist_hash_drbg_reseed_needed_p into the nist_hash_drbg API and make
+ * the NIST_HASH_DRBG structure opaque.
  */
 static bool
-nist_ctr_drbg_reseed_advised_p(NIST_CTR_DRBG *drbg)
+nist_hash_drbg_reseed_advised_p(NIST_HASH_DRBG *drbg)
 {
 
-	return (drbg->reseed_counter > (NIST_CTR_DRBG_RESEED_INTERVAL / 2));
+	return (drbg->reseed_counter > (NIST_HASH_DRBG_RESEED_INTERVAL / 2));
 }
 
 static bool
-nist_ctr_drbg_reseed_needed_p(NIST_CTR_DRBG *drbg)
+nist_hash_drbg_reseed_needed_p(NIST_HASH_DRBG *drbg)
 {
 
-	return (drbg->reseed_counter >= NIST_CTR_DRBG_RESEED_INTERVAL);
+	return (drbg->reseed_counter >= NIST_HASH_DRBG_RESEED_INTERVAL);
 }
 
 /*
@@ -363,27 +398,27 @@ cprng_strong_generate(struct cprng_strong *cprng, void *buffer, size_t bytes)
 	KASSERT(mutex_owned(&cprng->cs_lock));
 
 	/*
-	 * Generate some data from the NIST CTR_DRBG.  Caller
+	 * Generate some data from the NIST Hash_DRBG.  Caller
 	 * guarantees reseed if we're not ready, and if we exhaust the
 	 * generator, we mark ourselves not ready.  Consequently, this
-	 * call to the CTR_DRBG should not fail.
+	 * call to the Hash_DRBG should not fail.
 	 */
-	if (__predict_false(nist_ctr_drbg_generate(&cprng->cs_drbg, buffer,
+	if (__predict_false(nist_hash_drbg_generate(&cprng->cs_drbg, buffer,
 		    bytes, &cc, sizeof(cc))))
-		panic("cprng %s: NIST CTR_DRBG failed", cprng->cs_name);
+		panic("cprng %s: NIST Hash_DRBG failed", cprng->cs_name);
 
 	/*
 	 * If we've been seeing a lot of use, ask for some fresh
 	 * entropy soon.
 	 */
-	if (__predict_false(nist_ctr_drbg_reseed_advised_p(&cprng->cs_drbg)))
+	if (__predict_false(nist_hash_drbg_reseed_advised_p(&cprng->cs_drbg)))
 		rndsink_schedule(cprng->cs_rndsink);
 
 	/*
 	 * If we just exhausted the generator, inform the next user
 	 * that we need a reseed.
 	 */
-	if (__predict_false(nist_ctr_drbg_reseed_needed_p(&cprng->cs_drbg))) {
+	if (__predict_false(nist_hash_drbg_reseed_needed_p(&cprng->cs_drbg))) {
 		cprng->cs_ready = false;
 		rndsink_schedule(cprng->cs_rndsink); /* paranoia */
 	}
@@ -395,7 +430,7 @@ cprng_strong_generate(struct cprng_strong *cprng, void *buffer, size_t bytes)
 static void
 cprng_strong_reseed(struct cprng_strong *cprng)
 {
-	uint8_t seed[NIST_BLOCK_KEYLEN_BYTES];
+	uint8_t seed[NIST_HASH_DRBG_MIN_SEEDLEN_BYTES];
 
 	KASSERT(mutex_owned(&cprng->cs_lock));
 
@@ -414,7 +449,7 @@ cprng_strong_reseed_from(struct cprng_strong *cprng,
 {
 	const uint32_t cc = cprng_counter();
 
-	KASSERT(bytes == NIST_BLOCK_KEYLEN_BYTES);
+	KASSERT(bytes == NIST_HASH_DRBG_MIN_SEEDLEN_BYTES);
 	KASSERT(mutex_owned(&cprng->cs_lock));
 
 	/*
@@ -442,9 +477,11 @@ cprng_strong_reseed_from(struct cprng_strong *cprng,
 			    cprng->cs_name);
 	}
 
-	if (nist_ctr_drbg_reseed(&cprng->cs_drbg, seed, bytes, &cc, sizeof(cc)))
-		/* XXX Fix nist_ctr_drbg API so this can't happen.  */
-		panic("cprng %s: NIST CTR_DRBG reseed failed", cprng->cs_name);
+	if (nist_hash_drbg_reseed(&cprng->cs_drbg, seed, bytes, &cc,
+		sizeof(cc)))
+		/* XXX Fix nist_hash_drbg API so this can't happen.  */
+		panic("cprng %s: NIST Hash_DRBG reseed failed",
+		    cprng->cs_name);
 
 #if DIAGNOSTIC
 	cprng_strong_rngtest(cprng);
@@ -469,9 +506,9 @@ cprng_strong_rngtest(struct cprng_strong *cprng)
 
 	(void)strlcpy(rt->rt_name, cprng->cs_name, sizeof(rt->rt_name));
 
-	if (nist_ctr_drbg_generate(&cprng->cs_drbg, rt->rt_b, sizeof(rt->rt_b),
-		NULL, 0))
-		panic("cprng %s: NIST CTR_DRBG failed after reseed",
+	if (nist_hash_drbg_generate(&cprng->cs_drbg, rt->rt_b,
+		sizeof(rt->rt_b), NULL, 0))
+		panic("cprng %s: NIST Hash_DRBG failed after reseed",
 		    cprng->cs_name);
 
 	if (rngtest(rt)) {
@@ -502,6 +539,7 @@ cprng_strong_rndsink_callback(void *context, const void *seed, size_t bytes)
 	mutex_exit(&cprng->cs_lock);
 }
 
+static ONCE_DECL(sysctl_prng_once);
 static cprng_strong_t *sysctl_prng;
 
 static int
@@ -521,10 +559,9 @@ makeprng(void)
 static int
 sysctl_kern_urnd(SYSCTLFN_ARGS)
 {
-	static ONCE_DECL(control);
 	int v, rv;
 
-	RUN_ONCE(&control, makeprng);
+	RUN_ONCE(&sysctl_prng_once, makeprng);
 	rv = cprng_strong(sysctl_prng, &v, sizeof(v), 0);
 	if (rv == sizeof(v)) {
 		struct sysctlnode node = *rnode;
@@ -553,6 +590,7 @@ sysctl_kern_arnd(SYSCTLFN_ARGS)
 	int error;
 	void *v;
 	struct sysctlnode node = *rnode;
+	size_t n __diagused;
 
 	switch (*oldlenp) {
 	    case 0:
@@ -561,8 +599,10 @@ sysctl_kern_arnd(SYSCTLFN_ARGS)
 		if (*oldlenp > 256) {
 			return E2BIG;
 		}
+		RUN_ONCE(&sysctl_prng_once, makeprng);
 		v = kmem_alloc(*oldlenp, KM_SLEEP);
-		cprng_fast(v, *oldlenp);
+		n = cprng_strong(sysctl_prng, v, *oldlenp, 0);
+		KASSERT(n == *oldlenp);
 		node.sysctl_data = v;
 		node.sysctl_size = *oldlenp;
 		error = sysctl_lookup(SYSCTLFN_CALL(&node));

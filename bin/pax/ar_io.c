@@ -1,4 +1,4 @@
-/*	$NetBSD: ar_io.c,v 1.57 2016/05/31 03:32:36 dholland Exp $	*/
+/*	$NetBSD: ar_io.c,v 1.59 2019/02/04 04:36:41 mrg Exp $	*/
 
 /*-
  * Copyright (c) 1992 Keith Muller.
@@ -42,27 +42,27 @@
 #if 0
 static char sccsid[] = "@(#)ar_io.c	8.2 (Berkeley) 4/18/94";
 #else
-__RCSID("$NetBSD: ar_io.c,v 1.57 2016/05/31 03:32:36 dholland Exp $");
+__RCSID("$NetBSD: ar_io.c,v 1.59 2019/02/04 04:36:41 mrg Exp $");
 #endif
 #endif /* not lint */
 
-#include <sys/types.h>
 #include <sys/param.h>
-#include <sys/time.h>
-#include <sys/stat.h>
 #include <sys/ioctl.h>
 #ifdef HAVE_SYS_MTIO_H
 #include <sys/mtio.h>
 #endif
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
 #ifdef SUPPORT_RMT
 #define __RMTLIB_PRIVATE
 #include <rmt.h>
@@ -1631,7 +1631,7 @@ void
 ar_summary(int n)
 {
 	time_t secs;
-	char buf[BUFSIZ];
+	char buf[4096];
 	char tbuf[MAXPATHLEN/4];	/* XXX silly size! */
 	char s1buf[MAXPATHLEN/8];	/* XXX very silly size! */
 	char s2buf[MAXPATHLEN/8];	/* XXX very silly size! */

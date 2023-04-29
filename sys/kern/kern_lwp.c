@@ -1,4 +1,4 @@
-/*	$NetBSD: kern_lwp.c,v 1.185 2016/07/03 14:24:58 christos Exp $	*/
+/*	$NetBSD: kern_lwp.c,v 1.202.2.3 2020/02/12 19:35:31 martin Exp $	*/
 
 /*-
  * Copyright (c) 2001, 2006, 2007, 2008, 2009 The NetBSD Foundation, Inc.
@@ -211,7 +211,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: kern_lwp.c,v 1.185 2016/07/03 14:24:58 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: kern_lwp.c,v 1.202.2.3 2020/02/12 19:35:31 martin Exp $");
 
 #include "opt_ddb.h"
 #include "opt_lockdebug.h"
@@ -236,11 +236,14 @@ __KERNEL_RCSID(0, "$NetBSD: kern_lwp.c,v 1.185 2016/07/03 14:24:58 christos Exp 
 #include <sys/lwpctl.h>
 #include <sys/atomic.h>
 #include <sys/filedesc.h>
+#include <sys/fstrans.h>
 #include <sys/dtrace_bsd.h>
 #include <sys/sdt.h>
+#include <sys/ptrace.h>
 #include <sys/xcall.h>
 #include <sys/uidinfo.h>
 #include <sys/sysctl.h>
+#include <sys/psref.h>
 
 #include <uvm/uvm_extern.h>
 #include <uvm/uvm_object.h>
@@ -405,6 +408,11 @@ lwp_suspend(struct lwp *curl, struct lwp *t)
 		return (EDEADLK);
 	}
 
+	if ((t->l_flag & LW_DBGSUSPEND) != 0) {
+		lwp_unlock(t);
+		return 0;
+	}
+
 	error = 0;
 
 	switch (t->l_stat) {
@@ -469,7 +477,7 @@ lwp_continue(struct lwp *l)
 
 	l->l_flag &= ~LW_WSUSPEND;
 
-	if (l->l_stat != LSSUSPENDED) {
+	if (l->l_stat != LSSUSPENDED || (l->l_flag & LW_DBGSUSPEND) != 0) {
 		lwp_unlock(l);
 		return;
 	}
@@ -493,6 +501,8 @@ lwp_unstop(struct lwp *l)
 	KASSERT(mutex_owned(p->p_lock));
 
 	lwp_lock(l);
+
+	KASSERT((l->l_flag & LW_DBGSUSPEND) == 0);
 
 	/* If not stopped, then just bail out. */
 	if (l->l_stat != LSSTOP) {
@@ -760,8 +770,9 @@ lwp_find_free_lid(lwpid_t try_lid, lwp_t * new_lwp, proc_t *p)
  */
 int
 lwp_create(lwp_t *l1, proc_t *p2, vaddr_t uaddr, int flags,
-	   void *stack, size_t stacksize, void (*func)(void *), void *arg,
-	   lwp_t **rnewlwpp, int sclass)
+    void *stack, size_t stacksize, void (*func)(void *), void *arg,
+    lwp_t **rnewlwpp, int sclass, const sigset_t *sigmask,
+    const stack_t *sigstk)
 {
 	struct lwp *l2, *isfree;
 	turnstile_t *ts;
@@ -834,6 +845,7 @@ lwp_create(lwp_t *l1, proc_t *p2, vaddr_t uaddr, int flags,
 	l2->l_flag = 0;
 	l2->l_pflag = LP_MPSAFE;
 	TAILQ_INIT(&l2->l_ld_locks);
+	l2->l_psrefs = 0;
 
 	/*
 	 * For vfork, borrow parent's lwpctl context if it exists.
@@ -875,6 +887,7 @@ lwp_create(lwp_t *l1, proc_t *p2, vaddr_t uaddr, int flags,
 	cv_init(&l2->l_sigcv, "sigwait");
 	cv_init(&l2->l_waitcv, "vfork");
 	l2->l_syncobj = &sched_syncobj;
+	PSREF_DEBUG_INIT_LWP(l2);
 
 	if (rnewlwpp != NULL)
 		*rnewlwpp = l2;
@@ -884,10 +897,12 @@ lwp_create(lwp_t *l1, proc_t *p2, vaddr_t uaddr, int flags,
 	 * the MD cpu_lwp_fork() can copy the saved state to the new LWP.
 	 */
 	pcu_save_all(l1);
+#if PCU_UNIT_COUNT > 0
+	l2->l_pcu_valid = l1->l_pcu_valid;
+#endif
 
 	uvm_lwp_setuarea(l2, uaddr);
-	uvm_lwp_fork(l1, l2, stack, stacksize, func,
-	    (arg != NULL) ? arg : l2);
+	uvm_lwp_fork(l1, l2, stack, stacksize, func, (arg != NULL) ? arg : l2);
 
 	if ((flags & LWP_PIDLID) != 0) {
 		lid = proc_alloc_pid(p2);
@@ -904,8 +919,8 @@ lwp_create(lwp_t *l1, proc_t *p2, vaddr_t uaddr, int flags,
 	} else
 		l2->l_prflag = 0;
 
-	l2->l_sigstk = l1->l_sigstk;
-	l2->l_sigmask = l1->l_sigmask;
+	l2->l_sigstk = *sigstk;
+	l2->l_sigmask = *sigmask;
 	TAILQ_INIT(&l2->l_sigpend.sp_info);
 	sigemptyset(&l2->l_sigpend.sp_set);
 
@@ -1057,6 +1072,9 @@ lwp_exit(struct lwp *l)
 	/* Drop filedesc reference. */
 	fd_free();
 
+	/* Release fstrans private data. */
+	fstrans_lwp_dtor(l);
+
 	/* Delete the specificdata while it's still safe to sleep. */
 	lwp_finispecific(l);
 
@@ -1067,10 +1085,28 @@ lwp_exit(struct lwp *l)
 	callout_destroy(&l->l_timeout_ch);
 
 	/*
+	 * If traced, report LWP exit event to the debugger.
+	 *
 	 * Remove the LWP from the global list.
 	 * Free its LID from the PID namespace if needed.
 	 */
 	mutex_enter(proc_lock);
+
+	if ((p->p_slflag & (PSL_TRACED|PSL_TRACELWP_EXIT)) ==
+	    (PSL_TRACED|PSL_TRACELWP_EXIT)) {
+		mutex_enter(p->p_lock);
+		if (ISSET(p->p_sflag, PS_WEXIT)) {
+			mutex_exit(p->p_lock);
+			/*
+			 * We are exiting, bail out without informing parent
+			 * about a terminating LWP as it would deadlock.
+			 */
+		} else {
+			eventswitch(TRAP_LWP, PTRACE_LWP_EXIT, l->l_lid);
+			mutex_enter(proc_lock);
+		}
+	}
+
 	LIST_REMOVE(l, l_list);
 	if ((l->l_pflag & LP_PIDLID) != 0 && l->l_lid != p->p_pid) {
 		proc_free_pid(l->l_lid);
@@ -1770,10 +1806,7 @@ lwp_ctl_alloc(vaddr_t *uaddr)
 			return ENOMEM;
 		}
 		lcp = kmem_alloc(LWPCTL_LCPAGE_SZ, KM_SLEEP);
-		if (lcp == NULL) {
-			mutex_exit(&lp->lp_lock);
-			return ENOMEM;
-		}
+
 		/*
 		 * Wire the next page down in kernel space.  Since this
 		 * is a new mapping, we must add a reference.
@@ -1813,7 +1846,7 @@ lwp_ctl_alloc(vaddr_t *uaddr)
 			i = 0;
 	}
 	bit = ffs(lcp->lcp_bitmap[i]) - 1;
-	lcp->lcp_bitmap[i] ^= (1 << bit);
+	lcp->lcp_bitmap[i] ^= (1U << bit);
 	lcp->lcp_rotor = i;
 	lcp->lcp_nfree--;
 	l->l_lcpage = lcp;
@@ -1823,7 +1856,7 @@ lwp_ctl_alloc(vaddr_t *uaddr)
 	mutex_exit(&lp->lp_lock);
 
 	KPREEMPT_DISABLE(l);
-	l->l_lwpctl->lc_curcpu = (int)curcpu()->ci_data.cpu_index;
+	l->l_lwpctl->lc_curcpu = (int)cpu_index(curcpu());
 	KPREEMPT_ENABLE(l);
 
 	return 0;
@@ -1856,7 +1889,7 @@ lwp_ctl_free(lwp_t *l)
 	mutex_enter(&lp->lp_lock);
 	lcp->lcp_nfree++;
 	map = offset >> 5;
-	lcp->lcp_bitmap[map] |= (1 << (offset & 31));
+	lcp->lcp_bitmap[map] |= (1U << (offset & 31));
 	if (lcp->lcp_bitmap[lcp->lcp_rotor] == 0)
 		lcp->lcp_rotor = map;
 	if (TAILQ_FIRST(&lp->lp_pages)->lcp_nfree == 0) {

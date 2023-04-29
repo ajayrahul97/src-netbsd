@@ -1,4 +1,4 @@
-/*	$NetBSD: subr_disk.c,v 1.116 2016/01/06 00:22:30 christos Exp $	*/
+/*	$NetBSD: subr_disk.c,v 1.128 2019/05/22 08:47:02 hannken Exp $	*/
 
 /*-
  * Copyright (c) 1996, 1997, 1999, 2000, 2009 The NetBSD Foundation, Inc.
@@ -67,7 +67,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: subr_disk.c,v 1.116 2016/01/06 00:22:30 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: subr_disk.c,v 1.128 2019/05/22 08:47:02 hannken Exp $");
 
 #include <sys/param.h>
 #include <sys/kernel.h>
@@ -130,7 +130,7 @@ diskerr(const struct buf *bp, const char *dname, const char *what, int pri,
 	daddr_t sn;
 
 	if (/*CONSTCOND*/0)
-		/* Compiler will error this is the format is wrong... */
+		/* Compiler will error this if the format is wrong... */
 		printf("%" PRIdaddr, bp->b_blkno);
 
 	if (pri != LOG_PRINTF) {
@@ -199,6 +199,17 @@ disk_init(struct disk *diskp, const char *name, const struct dkdriver *driver)
 }
 
 /*
+ * Rename a disk.
+ */
+void
+disk_rename(struct disk *diskp, const char *name)
+{
+
+	diskp->dk_name = name;
+	iostat_rename(diskp->dk_stats, diskp->dk_name);
+}
+
+/*
  * Attach a disk.
  */
 void
@@ -211,8 +222,6 @@ disk_attach(struct disk *diskp)
 	diskp->dk_label = kmem_zalloc(sizeof(struct disklabel), KM_SLEEP);
 	diskp->dk_cpulabel = kmem_zalloc(sizeof(struct cpu_disklabel),
 	    KM_SLEEP);
-	if ((diskp->dk_label == NULL) || (diskp->dk_cpulabel == NULL))
-		panic("disk_attach: can't allocate storage for disklabel");
 
 	/*
 	 * Set up the stats collection.
@@ -272,6 +281,16 @@ disk_destroy(struct disk *diskp)
 
 	mutex_destroy(&diskp->dk_openlock);
 	mutex_destroy(&diskp->dk_rawlock);
+}
+
+/*
+ * Mark the disk as having work queued for metrics collection.
+ */
+void
+disk_wait(struct disk *diskp)
+{
+
+	iostat_wait(diskp->dk_stats);
 }
 
 /*
@@ -573,7 +592,7 @@ disk_ioctl(struct disk *dk, dev_t dev, u_long cmd, void *data, int flag,
 		pi = data;
 		memset(pi, 0, sizeof(*pi));
 		pi->pi_secsize = dk->dk_geom.dg_secsize;
-		pi->pi_bsize = BLKDEV_IOSIZE;
+		pi->pi_bsize = MAX(BLKDEV_IOSIZE, pi->pi_secsize);
 
 		if (DISKPART(dev) == RAW_PART) {
 			pi->pi_size = dk->dk_geom.dg_secperunit;
@@ -635,6 +654,13 @@ disk_ioctl(struct disk *dk, dev_t dev, u_long cmd, void *data, int flag,
 			return EBADF;
 
 		dkwedge_discover(dk);
+		return 0;
+
+	case DIOCRMWEDGES:
+		if ((flag & FWRITE) == 0)
+			return EBADF;
+
+		dkwedge_delall(dk);
 		return 0;
 
 	default:

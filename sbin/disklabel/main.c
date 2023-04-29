@@ -1,4 +1,4 @@
-/*	$NetBSD: main.c,v 1.46 2016/01/31 18:57:29 christos Exp $	*/
+/*	$NetBSD: main.c,v 1.52 2019/07/03 07:05:27 mlelstv Exp $	*/
 
 /*
  * Copyright (c) 2006 The NetBSD Foundation, Inc.
@@ -76,7 +76,7 @@ __COPYRIGHT("@(#) Copyright (c) 1987, 1993\
 static char sccsid[] = "@(#)disklabel.c	8.4 (Berkeley) 5/4/95";
 /* from static char sccsid[] = "@(#)disklabel.c	1.2 (Symmetric) 11/28/85"; */
 #else
-__RCSID("$NetBSD: main.c,v 1.46 2016/01/31 18:57:29 christos Exp $");
+__RCSID("$NetBSD: main.c,v 1.52 2019/07/03 07:05:27 mlelstv Exp $");
 #endif
 #endif	/* not lint */
 
@@ -154,7 +154,6 @@ static	int	tflag;		/* Format output as disktab */
 static	int	Dflag;		/* Delete old labels (use with write) */
 static	int	Iflag;		/* Read/write direct, but default if absent */
 static	int	lflag;		/* List all known file system types and exit */
-static	int	mflag;		/* Expect disk to contain an MBR */
 static int verbose;
 static int read_all;		/* set if op = READ && Aflag */
 
@@ -262,7 +261,6 @@ static const struct disklabel_params {
 	{ "prep",	1, 1,  8, 2,  0,  0, BIG_ENDIAN },	/* powerpc */
 
 	{ "dreamcast",	1, 1, 16, 2,  0,  0, LITTLE_ENDIAN },	/* sh3 */
-	{ "evbarm64",	1, 1, 16, 2,  0,  0, 0 },		/* aarch64 */
 	{ "evbcf",	1, 1, 16, 2,  0,  0, BIG_ENDIAN },	/* coldfire */
 	{ "evbppc-mbr",	1, 1, 16, 2,  0,  0, BIG_ENDIAN },	/* powerpc */
 	{ "evbsh3",	1, 1, 16, 2,  0,  0, 0 },		/* sh3 */
@@ -271,7 +269,6 @@ static const struct disklabel_params {
 	{ "or1k",	1, 1, 16, 2,  0,  0, BIG_ENDIAN },	/* or1k */
 	{ "riscv",	1, 1, 16, 2,  0,  0, LITTLE_ENDIAN },	/* riscv */
 
- 	{ "acorn26",	1, 1, 16, 2,  8,  0, LITTLE_ENDIAN },	/* arm */
 	{ "acorn32",	1, 1, 16, 2,  8,  0, LITTLE_ENDIAN },	/* arm */
 	{ "cats",	1, 1, 16, 2,  8,  0, LITTLE_ENDIAN },	/* arm */
 	{ "evbarm",	1, 1, 16, 2,  8,  0, 0 },		/* arm */
@@ -387,7 +384,7 @@ setbyteorder(int new_byteorder)
 	if ((!biendian_p || set_p)
 	    && byteorder != 0
 	    && byteorder != new_byteorder) {
-		warn("changing %s byteorder to %s",
+		warnx("changing %s byteorder to %s",
 		    byteorder == LITTLE_ENDIAN ? "le" : "be",
 		    new_byteorder == LITTLE_ENDIAN ? "le" : "be");
 	}
@@ -483,6 +480,9 @@ main(int argc, char *argv[])
 #endif
 		DELETE
 	} op = UNSPEC, old_op;
+#if !defined(NATIVELABEL_ONLY)
+	unsigned long val;
+#endif
 
 #ifndef HAVE_NBTOOL_CONFIG_H
 #if !defined(NATIVELABEL_ONLY)
@@ -504,22 +504,17 @@ main(int argc, char *argv[])
 	}
 #endif
 
-	mflag = labelusesmbr;
-	if (mflag < 0) {
-#if HAVE_NBTOOL_CONFIG_H
-		warn("getlabelusesmbr() failed");
-#else
-		warn("getlabelusesmbr() failed");
-		mflag = LABELUSESMBR;
-#endif
-	}
 #if HAVE_NBTOOL_CONFIG_H
 	/* We must avoid doing any ioctl requests */
 	Fflag = rflag = 1;
 #endif
 
 	error = 0;
-	while ((ch = getopt(argc, argv, "AB:CDFIM:NRWef:ilmrtvw")) != -1) {
+#if !defined(NATIVELABEL_ONLY)
+	while ((ch = getopt(argc, argv, "AB:CDFIL:M:NO:P:RWef:ilmnrtvw")) != -1) {
+#else
+	while ((ch = getopt(argc, argv, "ACDFINRWef:ilrtvw")) != -1) {
+#endif
 		old_op = op;
 		switch (ch) {
 		case 'A':	/* Action all labels */
@@ -561,6 +556,26 @@ main(int argc, char *argv[])
 		case 'N':	/* Disallow writes to label sector */
 			op = SETREADONLY;
 			break;
+#if !defined(NATIVELABEL_ONLY)
+		case 'L':	/* Label sector */
+			val = strtoul(optarg, NULL, 10);
+			if ((val == ULONG_MAX && errno == ERANGE) || val > UINT_MAX)
+				err(EXIT_FAILURE, "invalid label sector: %s", optarg);
+			labelsector = val;
+			break;
+		case 'O':	/* Label offset */
+			val = strtoul(optarg, NULL, 10);
+			if ((val == ULONG_MAX && errno == ERANGE) || val > UINT_MAX)
+				err(EXIT_FAILURE, "invalid label offset: %s", optarg);
+			labeloffset = val;
+			break;
+		case 'P':	/* Max partitions */
+			val = strtoul(optarg, NULL, 10);
+			if ((val == ULONG_MAX && errno == ERANGE) || val < 1 || val > UINT_MAX)
+				err(EXIT_FAILURE, "invalid max partitions: %s", optarg);
+			maxpartitions = val;
+			break;
+#endif
 		case 'W':	/* Allow writes to label sector */
 			op = SETWRITABLE;
 			break;
@@ -579,9 +594,14 @@ main(int argc, char *argv[])
 		case 'l':	/* List all known file system types and exit */
 			lflag = 1;
 			break;
+#if !defined(NATIVELABEL_ONLY)
 		case 'm':	/* Expect disk to have an MBR */
-			mflag ^= 1;
+			labelusesmbr = 1;
 			break;
+		case 'n':	/* Expect disk to not have an MBR */
+			labelusesmbr = 0;
+			break;
+#endif
 		case 'r':	/* Read/write label directly from disk */
 			rflag = 1;
 			break;
@@ -600,6 +620,10 @@ main(int argc, char *argv[])
 		}
 		if (old_op != UNSPEC && old_op != op)
 			usage();
+	}
+
+	if (maxpartitions > MAXPARTITIONS) {
+		errx(1, "too large maxpartitions > %u\n", MAXPARTITIONS);
 	}
 
 #if !defined(NATIVELABEL_ONLY)
@@ -991,7 +1015,7 @@ readlabel_mbr(int f, u_int sector)
 static int
 writelabel_mbr(int f, u_int sector)
 {
-	return update_label(f, sector, mflag ? LABELOFFSET_MBR : ~0U) ? 2 : 0;
+	return update_label(f, sector, labelusesmbr ? LABELOFFSET_MBR : ~0U) ? 2 : 0;
 }
 
 #endif	/* !NO_MBR_SUPPORT */
@@ -1191,7 +1215,7 @@ readlabel(int f)
 static struct disklabel *
 find_label(int f, u_int sector)
 {
-	struct disklabel *disk_lp, hlp;
+	struct disklabel *disk_lp, hlp, tlp;
 	int i;
 	off_t offset;
 	const char *is_deleted;
@@ -1211,30 +1235,31 @@ find_label(int f, u_int sector)
 	/* Check expected offset first */
 	for (offset = LABEL_OFFSET, i = -4;; offset = i += 4) {
 		is_deleted = "";
-		disk_lp = (void *)(bootarea + offset);
 		if (i == LABEL_OFFSET)
 			continue;
+		disk_lp = (void *)(bootarea + offset);
+		memcpy(&tlp, disk_lp, sizeof(tlp));
 		if ((char *)(disk_lp + 1) > bootarea + bootarea_len)
 			break;
-		if (disk_lp->d_magic2 != disk_lp->d_magic)
+		if (tlp.d_magic2 != tlp.d_magic)
 			continue;
-		if (read_all && (disk_lp->d_magic == DISKMAGIC_DELETED ||
-		    disk_lp->d_magic == DISKMAGIC_DELETED_REV)) {
-			disk_lp->d_magic ^= ~0u;
-			disk_lp->d_magic2 ^= ~0u;
+		if (read_all && (tlp.d_magic == DISKMAGIC_DELETED ||
+		    tlp.d_magic == DISKMAGIC_DELETED_REV)) {
+			tlp.d_magic ^= ~0u;
+			tlp.d_magic2 ^= ~0u;
 			is_deleted = "deleted ";
 		}
-		if (target32toh(disk_lp->d_magic) != DISKMAGIC) {
+		if (target32toh(tlp.d_magic) != DISKMAGIC) {
 			/* XXX: Do something about byte-swapped labels ? */
-			if (target32toh(disk_lp->d_magic) == DISKMAGIC_REV &&
-			    target32toh(disk_lp->d_magic2) == DISKMAGIC_REV)
+			if (target32toh(tlp.d_magic) == DISKMAGIC_REV &&
+			    target32toh(tlp.d_magic2) == DISKMAGIC_REV)
 				warnx("ignoring %sbyteswapped label"
 				    " at offset %jd from sector %u",
 				    is_deleted, (intmax_t)offset, sector);
 			continue;
 		}
-		if (target16toh(disk_lp->d_npartitions) > maxpartitions ||
-		    dkcksum_target(disk_lp) != 0) {
+		if (target16toh(tlp.d_npartitions) > maxpartitions ||
+		    dkcksum_target(&tlp) != 0) {
 			if (verbose > 0)
 				warnx("corrupt label found at offset %jd in "
 				    "sector %u", (intmax_t)offset, sector);
@@ -1248,7 +1273,7 @@ find_label(int f, u_int sector)
 
 		/* To print all the labels we have to do it here */
 		/* XXX: maybe we should compare them? */
-		targettohlabel(&hlp, disk_lp);
+		targettohlabel(&hlp, &tlp);
 		printf("# %ssector %u offset %jd bytes\n",
 		    is_deleted, sector, (intmax_t)offset);
 		if (tflag)
@@ -1258,7 +1283,8 @@ find_label(int f, u_int sector)
 			showpartitions(stdout, &hlp, Cflag);
 		}
 		checklabel(&hlp);
-		htotargetlabel(disk_lp, &hlp);
+		htotargetlabel(&tlp, &hlp);
+		memcpy(disk_lp, &tlp, sizeof(tlp));
 		/* Remember we've found a label */
 		read_all = 2;
 	}
@@ -1369,7 +1395,7 @@ readlabel_direct(int f)
 		}
 	}
 
-	if (mflag && process_mbr(f, readlabel_mbr) == 0)
+	if (labelusesmbr && process_mbr(f, readlabel_mbr) == 0)
 		return 0;
 
 	disk_lp = find_label(f, 0);
@@ -1378,7 +1404,7 @@ readlabel_direct(int f)
 		return 0;
 	}
 
-	if (!mflag && process_mbr(f, readlabel_mbr) == 0)
+	if (!labelusesmbr && process_mbr(f, readlabel_mbr) == 0)
 		return 0;
 
 	return 1;

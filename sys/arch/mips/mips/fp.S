@@ -1,4 +1,4 @@
-/*	$NetBSD: fp.S,v 1.46 2015/06/08 16:25:29 matt Exp $	*/
+/*	$NetBSD: fp.S,v 1.50 2019/04/06 03:06:26 thorpej Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -39,6 +39,8 @@
 #include <mips/asm.h>
 #include <mips/trap.h>
 #include <mips/cpuregs.h>
+
+#include <mips/locore.h>
 
 #include "assym.h"
 
@@ -143,7 +145,7 @@ NESTED(mips_emul_fp, CALLFRAME_SIZ, ra)
 #else
 	cfc1	a2, MIPS_FPU_CSR		# get exception register
 	PTR_L	a3, fmt_tbl(v0)			# switch on FUNC & FMT
-	and	a2, a2, ~MIPS_FPU_EXCEPTION_UNIMPL	# clear exception
+	and	a2, a2, ~MIPS_FPU_EXCEPTION_BITS	# clear exception
 	ctc1	a2, MIPS_FPU_CSR
 #endif
 	j	a3
@@ -844,7 +846,7 @@ bcemul_branch:
 	REG_L	a0, TF_REG_EPC(a1)
 	REG_EPILOGUE
 	PTR_ADDU a0, 4
-	jal	_C_LABEL(ufetch_uint32)
+	jal	_C_LABEL(mips_ufetch32)
 
 	move	a0, v0
 	REG_L	a1, CALLFRAME_FRAME(sp)
@@ -2825,6 +2827,7 @@ fpe_trap:
 	 * ctc1 with fpe bits set causes FPE in kernel mode panic on 5231.
 	 */
 	REG_S	a2, CALLFRAME_SIZ + 3*SZREG(sp)
+	move	a0, MIPS_CURLWP			# get current lwp
 	jal	_C_LABEL(fpu_save)		# on RM5231
 
 	REG_L	a2, CALLFRAME_SIZ + 3*SZREG(sp)

@@ -1,5 +1,3 @@
-/*	$NetBSD: npfctl.c,v 1.47 2016/06/29 21:40:20 christos Exp $	*/
-
 /*-
  * Copyright (c) 2009-2014 The NetBSD Foundation, Inc.
  * All rights reserved.
@@ -30,12 +28,19 @@
  */
 
 #include <sys/cdefs.h>
-__RCSID("$NetBSD: npfctl.c,v 1.47 2016/06/29 21:40:20 christos Exp $");
+__RCSID("$NetBSD: npfctl.c,v 1.60.2.2 2019/10/04 08:06:34 martin Exp $");
 
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/mman.h>
+#ifdef __NetBSD__
+#include <sha1.h>
+#include <sys/ioctl.h>
 #include <sys/module.h>
+#define SHA_DIGEST_LENGTH SHA1_DIGEST_LENGTH
+#else
+#include <openssl/sha.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,11 +49,10 @@ __RCSID("$NetBSD: npfctl.c,v 1.47 2016/06/29 21:40:20 christos Exp $");
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sha1.h>
+
+#include <arpa/inet.h>
 
 #include "npfctl.h"
-
-extern void		npf_yyparse_string(const char *);
 
 enum {
 	NPFCTL_START,
@@ -62,6 +66,8 @@ enum {
 	NPFCTL_STATS,
 	NPFCTL_SAVE,
 	NPFCTL_LOAD,
+	NPFCTL_DEBUG,
+	NPFCTL_CONN_LIST,
 };
 
 static const struct operations_s {
@@ -74,7 +80,6 @@ static const struct operations_s {
 	{	"reload",	NPFCTL_RELOAD		},
 	{	"show",		NPFCTL_SHOWCONF,	},
 	{	"flush",	NPFCTL_FLUSH		},
-	{	"valid",	NPFCTL_VALIDATE		},
 	/* Table */
 	{	"table",	NPFCTL_TABLE		},
 	/* Rule */
@@ -84,6 +89,10 @@ static const struct operations_s {
 	/* Full state save/load */
 	{	"save",		NPFCTL_SAVE		},
 	{	"load",		NPFCTL_LOAD		},
+	{	"list",		NPFCTL_CONN_LIST	},
+	/* Misc. */
+	{	"valid",	NPFCTL_VALIDATE		},
+	{	"debug",	NPFCTL_DEBUG		},
 	/* --- */
 	{	NULL,		0			}
 };
@@ -131,13 +140,23 @@ usage(void)
 	    "\t%s rule \"rule-name\" { list | flush }\n",
 	    progname);
 	fprintf(stderr,
-	    "\t%s table <tid> { add | rem | test } <address/mask>\n",
+	    "\t%s table \"table-name\" { add | rem | test } <address/mask>\n",
 	    progname);
 	fprintf(stderr,
-	    "\t%s table <tid> { list | flush }\n",
+	    "\t%s table \"table-name\" { list | flush }\n",
+	    progname);
+	fprintf(stderr,
+	    "\t%s table \"table-name\" replace [-n \"name\"]"
+	    " [-t <type>] <table-file>\n",
 	    progname);
 	fprintf(stderr,
 	    "\t%s save | load\n",
+	    progname);
+	fprintf(stderr,
+	    "\t%s list [-46hNnw] [-i <ifname>]\n",
+	    progname);
+	fprintf(stderr,
+	    "\t%s debug [<rule-file>] [<raw-output>]\n",
 	    progname);
 	exit(EXIT_FAILURE);
 }
@@ -209,54 +228,147 @@ npfctl_print_stats(int fd)
 }
 
 void
-npfctl_print_error(const nl_error_t *ne)
+npfctl_print_error(const npf_error_t *ne)
 {
-	const char *srcfile = ne->ne_source_file;
+	const char *srcfile = ne->source_file;
 
-	if (srcfile) {
-		warnx("source %s line %d", srcfile, ne->ne_source_line);
+	if (ne->error_msg) {
+		errx(EXIT_FAILURE, "%s", ne->error_msg);
 	}
-	if (ne->ne_id) {
-		warnx("object: %d", ne->ne_id);
+	if (srcfile) {
+		warnx("source %s line %d", srcfile, ne->source_line);
+	}
+	if (ne->id) {
+		warnx("object: %" PRIi64, ne->id);
 	}
 }
 
 char *
-npfctl_print_addrmask(int alen, const npf_addr_t *addr, npf_netmask_t mask)
+npfctl_print_addrmask(int alen, const char *fmt, const npf_addr_t *addr,
+    npf_netmask_t mask)
 {
+	const unsigned buflen = 256;
+	char *buf = ecalloc(1, buflen);
 	struct sockaddr_storage ss;
-	char *buf = ecalloc(1, 64);
-	int len;
+
+	memset(&ss, 0, sizeof(ss));
 
 	switch (alen) {
 	case 4: {
 		struct sockaddr_in *sin = (void *)&ss;
-		sin->sin_len = sizeof(*sin);
 		sin->sin_family = AF_INET;
-		sin->sin_port = 0;
 		memcpy(&sin->sin_addr, addr, sizeof(sin->sin_addr));
 		break;
 	}
 	case 16: {
 		struct sockaddr_in6 *sin6 = (void *)&ss;
-		sin6->sin6_len = sizeof(*sin6);
 		sin6->sin6_family = AF_INET6;
-		sin6->sin6_port = 0;
-		sin6->sin6_scope_id = 0;
 		memcpy(&sin6->sin6_addr, addr, sizeof(sin6->sin6_addr));
 		break;
 	}
 	default:
 		assert(false);
 	}
-	len = sockaddr_snprintf(buf, 64, "%a", (struct sockaddr *)&ss);
+	sockaddr_snprintf(buf, buflen, fmt, (const void *)&ss);
 	if (mask && mask != NPF_NO_NETMASK) {
-		snprintf(&buf[len], 64 - len, "/%u", mask);
+		const unsigned len = strlen(buf);
+		snprintf(&buf[len], buflen - len, "/%u", mask);
 	}
 	return buf;
 }
 
-__dead static void
+static int
+npfctl_table_type(const char *typename)
+{
+	static const struct tbltype_s {
+		const char *	name;
+		unsigned	type;
+	} tbltypes[] = {
+		{ "ipset",	NPF_TABLE_IPSET	},
+		{ "lpm",	NPF_TABLE_LPM	},
+		{ "const",	NPF_TABLE_CONST	},
+		{ NULL,		0		}
+	};
+
+	for (unsigned i = 0; tbltypes[i].name != NULL; i++) {
+		if (strcmp(typename, tbltypes[i].name) == 0) {
+			return tbltypes[i].type;
+		}
+	}
+	return 0;
+}
+
+static void
+npfctl_table_replace(int fd, int argc, char **argv)
+{
+	const char *name, *newname, *path, *typename = NULL;
+	int c, tid = -1;
+	FILE *fp;
+	nl_config_t *ncf;
+	nl_table_t *t;
+	u_int type = 0;
+
+	name = newname = argv[0];
+	optind = 2;
+	while ((c = getopt(argc, argv, "n:t:")) != -1) {
+		switch (c) {
+		case 't':
+			typename = optarg;
+			break;
+		case 'n':
+			newname = optarg;
+			break;
+		default:
+			fprintf(stderr,
+			    "Usage: %s table \"table-name\" replace "
+			    "[-n \"name\"] [-t <type>] <table-file>\n",
+			    getprogname());
+			exit(EXIT_FAILURE);
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (typename && (type = npfctl_table_type(typename)) == 0) {
+		errx(EXIT_FAILURE, "unsupported table type '%s'", typename);
+	}
+
+	if (argc != 1) {
+		usage();
+	}
+
+	path = argv[0];
+	if (strcmp(path, "-") == 0) {
+		path = "stdin";
+		fp = stdin;
+	} else if ((fp = fopen(path, "r")) == NULL) {
+		err(EXIT_FAILURE, "open '%s'", path);
+	}
+
+	/* Get existing config to lookup ID of existing table */
+	if ((ncf = npf_config_retrieve(fd)) == NULL) {
+		err(EXIT_FAILURE, "npf_config_retrieve()");
+	}
+	if ((t = npfctl_table_getbyname(ncf, name)) == NULL) {
+		errx(EXIT_FAILURE,
+		    "table '%s' not found in the active configuration", name);
+	}
+	tid = npf_table_getid(t);
+	if (!type) {
+		type = npf_table_gettype(t);
+	}
+	npf_config_destroy(ncf);
+
+	if ((t = npfctl_load_table(newname, tid, type, path, fp)) == NULL) {
+		err(EXIT_FAILURE, "table load failed");
+	}
+
+	if (npf_table_replace(fd, t, NULL)) {
+		err(EXIT_FAILURE, "npf_table_replace(<%s>)", name);
+	}
+}
+
+static void
 npfctl_table(int fd, int argc, char **argv)
 {
 	static const struct tblops_s {
@@ -331,7 +443,7 @@ again:
 	case EEXIST:
 		errx(EXIT_FAILURE, "entry already exists or is conflicting");
 	case ENOENT:
-		errx(EXIT_FAILURE, "no matching entry was not found");
+		errx(EXIT_FAILURE, "not found");
 	case EINVAL:
 		errx(EXIT_FAILURE, "invalid address, mask or table ID");
 	case ENOMEM:
@@ -353,7 +465,7 @@ again:
 		while (nct.nct_data.buf.len--) {
 			if (!ent->alen)
 				break;
-			buf = npfctl_print_addrmask(ent->alen,
+			buf = npfctl_print_addrmask(ent->alen, "%a",
 			    &ent->addr, ent->mask);
 			puts(buf);
 			ent++;
@@ -362,13 +474,12 @@ again:
 	} else {
 		printf("%s: %s\n", getprogname(),
 		    nct.nct_cmd == NPF_CMD_TABLE_LOOKUP ?
-		    "matching entry found" : "success");
+		    "match" : "success");
 	}
-	exit(EXIT_SUCCESS);
 }
 
 static nl_rule_t *
-npfctl_parse_rule(int argc, char **argv)
+npfctl_parse_rule(int argc, char **argv, parse_entry_t entry)
 {
 	char rule_string[1024];
 	nl_rule_t *rl;
@@ -377,23 +488,25 @@ npfctl_parse_rule(int argc, char **argv)
 	if (!join(rule_string, sizeof(rule_string), argc, argv, " ")) {
 		errx(EXIT_FAILURE, "command too long");
 	}
-	npfctl_parse_string(rule_string);
+	npfctl_parse_string(rule_string, entry);
 	if ((rl = npfctl_rule_ref()) == NULL) {
 		errx(EXIT_FAILURE, "could not parse the rule");
 	}
 	return rl;
 }
 
-static void
-SHA1(const uint8_t *d, unsigned int n, uint8_t *md)
+#ifdef __NetBSD__
+static unsigned char *
+SHA1(const unsigned char *d, size_t l, unsigned char *md)
 {
-    SHA1_CTX c;
+	SHA1_CTX c;
 
-    SHA1Init(&c);
-    SHA1Update(&c, d, n);
-    SHA1Final(md, &c);
-    memset(&c, 0, sizeof(c));
+	SHA1Init(&c);
+	SHA1Update(&c, d, l);
+	SHA1Final(md, &c);
+	return md;
 }
+#endif
 
 static void
 npfctl_generate_key(nl_rule_t *rl, void *key)
@@ -404,13 +517,21 @@ npfctl_generate_key(nl_rule_t *rl, void *key)
 	if ((meta = npf_rule_export(rl, &len)) == NULL) {
 		errx(EXIT_FAILURE, "error generating rule key");
 	}
-	__CTASSERT(NPF_RULE_MAXKEYLEN >= SHA1_DIGEST_LENGTH);
+	__CTASSERT(NPF_RULE_MAXKEYLEN >= SHA_DIGEST_LENGTH);
 	memset(key, 0, NPF_RULE_MAXKEYLEN);
-	SHA1(meta, (unsigned int)len, key);
+	SHA1(meta, len, key);
 	free(meta);
 }
 
-__dead static void
+int
+npfctl_nat_ruleset_p(const char *name, bool *natset)
+{
+	const size_t preflen = sizeof(NPF_RULESET_MAP_PREF) - 1;
+	*natset = strncmp(name, NPF_RULESET_MAP_PREF, preflen) == 0;
+	return (*natset && strlen(name) <= preflen) ? -1 : 0;
+}
+
+static void
 npfctl_rule(int fd, int argc, char **argv)
 {
 	static const struct ruleops_s {
@@ -430,11 +551,12 @@ npfctl_rule(int fd, int argc, char **argv)
 	const char *ruleset_name = argv[0];
 	const char *cmd = argv[1];
 	int error, action = 0;
+	bool extra_arg, natset;
+	parse_entry_t entry;
 	uint64_t rule_id;
-	bool extra_arg;
 	nl_rule_t *rl;
 
-	for (int n = 0; ruleops[n].cmd != NULL; n++) {
+	for (unsigned n = 0; ruleops[n].cmd != NULL; n++) {
 		if (strcmp(cmd, ruleops[n].cmd) == 0) {
 			action = ruleops[n].action;
 			extra_arg = ruleops[n].extra_arg;
@@ -448,15 +570,22 @@ npfctl_rule(int fd, int argc, char **argv)
 		usage();
 	}
 
+	if (npfctl_nat_ruleset_p(ruleset_name, &natset) != 0) {
+		errx(EXIT_FAILURE,
+		    "invalid NAT ruleset name (note: the name must be "
+		    "prefixed with `" NPF_RULESET_MAP_PREF "`)");
+	}
+	entry = natset ? NPFCTL_PARSE_MAP : NPFCTL_PARSE_RULE;
+
 	switch (action) {
 	case NPF_CMD_RULE_ADD:
-		rl = npfctl_parse_rule(argc, argv);
+		rl = npfctl_parse_rule(argc, argv, entry);
 		npfctl_generate_key(rl, key);
 		npf_rule_setkey(rl, key, sizeof(key));
 		error = npf_ruleset_add(fd, ruleset_name, rl, &rule_id);
 		break;
 	case NPF_CMD_RULE_REMKEY:
-		rl = npfctl_parse_rule(argc, argv);
+		rl = npfctl_parse_rule(argc, argv, entry);
 		npfctl_generate_key(rl, key);
 		error = npf_ruleset_remkey(fd, ruleset_name, key, sizeof(key));
 		break;
@@ -471,7 +600,7 @@ npfctl_rule(int fd, int argc, char **argv)
 		error = npf_ruleset_flush(fd, ruleset_name);
 		break;
 	default:
-		assert(false);
+		abort();
 	}
 
 	switch (error) {
@@ -488,7 +617,6 @@ npfctl_rule(int fd, int argc, char **argv)
 	if (action == NPF_CMD_RULE_ADD) {
 		printf("OK %" PRIx64 "\n", rule_id);
 	}
-	exit(EXIT_SUCCESS);
 }
 
 static bool bpfjit = true;
@@ -502,6 +630,7 @@ npfctl_bpfjit(bool onoff)
 static void
 npfctl_preload_bpfjit(void)
 {
+#ifdef __NetBSD__
 	modctl_load_t args = {
 		.ml_filename = "bpfjit",
 		.ml_flags = MODCTL_NO_PROP,
@@ -521,63 +650,186 @@ npfctl_preload_bpfjit(void)
 		warnx("To disable this warning `set bpf.jit off' in "
 		    "/etc/npf.conf");
 	}
-}
-
-static int
-npfctl_save(int fd)
-{
-	nl_config_t *ncf;
-	bool active, loaded;
-	int error;
-
-	ncf = npf_config_retrieve(fd, &active, &loaded);
-	if (ncf == NULL) {
-		return errno;
-	}
-	error = npf_config_export(ncf, NPF_DB_PATH);
-	npf_config_destroy(ncf);
-	return error;
+#endif
 }
 
 static int
 npfctl_load(int fd)
 {
 	nl_config_t *ncf;
+	npf_error_t errinfo;
+	struct stat sb;
+	size_t blen;
+	void *blob;
 	int error;
 
-	ncf = npf_config_import(NPF_DB_PATH);
+	/*
+	 * The file may change while reading - we are not handling this,
+	 * leaving this responsibility for the caller.
+	 */
+	if (stat(NPF_DB_PATH, &sb) == -1) {
+		err(EXIT_FAILURE, "stat");
+	}
+	if ((blen = sb.st_size) == 0) {
+		err(EXIT_FAILURE, "saved configuration file is empty");
+	}
+	if ((blob = mmap(NULL, blen, PROT_READ,
+	    MAP_FILE | MAP_PRIVATE, fd, 0)) == MAP_FAILED) {
+		err(EXIT_FAILURE, "mmap");
+	}
+	ncf = npf_config_import(blob, blen);
+	munmap(blob, blen);
 	if (ncf == NULL) {
 		return errno;
 	}
-	errno = error = npf_config_submit(ncf, fd);
+
+	/*
+	 * Configuration imported - submit it now.
+	 **/
+	errno = error = npf_config_submit(ncf, fd, &errinfo);
 	if (error) {
-		nl_error_t ne;
-		_npf_config_error(ncf, &ne);
-		npfctl_print_error(&ne);
+		npfctl_print_error(&errinfo);
 	}
 	npf_config_destroy(ncf);
 	return error;
 }
 
+struct npf_conn_filter {
+	uint16_t	alen;
+	const char *	ifname;
+	bool		nat;
+	bool		wide;
+	bool		name;
+	int		width;
+	FILE *		fp;
+};
+
+static int
+npfctl_conn_print(unsigned alen, const npf_addr_t *a, const in_port_t *p,
+    const char *ifname, void *v)
+{
+	struct npf_conn_filter *fil = v;
+	FILE *fp = fil->fp;
+	char *src, *dst;
+
+	if (fil->ifname && strcmp(ifname, fil->ifname) != 0)
+		return 0;
+	if (fil->alen && alen != fil->alen)
+		return 0;
+	if (fil->nat && !p[2])
+		return 0;
+
+	int w = fil->width;
+	const char *fmt = fil->name ? "%A" :
+	    (alen == sizeof(struct in_addr) ? "%a" : "[%a]");
+	src = npfctl_print_addrmask(alen, fmt, &a[0], NPF_NO_NETMASK);
+	dst = npfctl_print_addrmask(alen, fmt, &a[1], NPF_NO_NETMASK);
+
+	if (fil->wide) {
+		fprintf(fp, "%s:%d %s:%d", src, p[0], dst, p[1]);
+	} else {
+		fprintf(fp, "%*.*s:%-5d %*.*s:%-5d", w, w, src, p[0],
+		    w, w, dst, p[1]);
+	}
+	free(src);
+	free(dst);
+	if (!p[2]) {
+		fputc('\n', fp);
+		return 1;
+	}
+	fprintf(fp, " via %s:%d\n", ifname, p[2]);
+	return 1;
+}
+
+static int
+npfctl_conn_list(int fd, int argc, char **argv)
+{
+	struct npf_conn_filter f;
+	int c, w, header = true;
+
+	memset(&f, 0, sizeof(f));
+	argc--;
+	argv++;
+
+	while ((c = getopt(argc, argv, "46hi:nNw")) != -1) {
+		switch (c) {
+		case '4':
+			f.alen = sizeof(struct in_addr);
+			break;
+		case '6':
+			f.alen = sizeof(struct in6_addr);
+			break;
+		case 'h':
+			header = false;
+			break;
+		case 'i':
+			f.ifname = optarg;
+			break;
+		case 'n':
+			f.nat = true;
+			break;
+		case 'N':
+			f.name = true;
+			break;
+		case 'w':
+			f.wide = true;
+			break;
+		default:
+			fprintf(stderr,
+			    "Usage: %s list [-46hnNw] [-i <ifname>]\n",
+			    getprogname());
+			exit(EXIT_FAILURE);
+		}
+	}
+	f.width = f.alen == sizeof(struct in_addr) ? 25 : 41;
+	w = f.width + 6;
+	f.fp = stdout;
+
+	if (header) {
+		fprintf(f.fp, "%*.*s %*.*s\n",
+		    w, w, "From address:port ", w, w, "To address:port ");
+	}
+	npf_conn_list(fd, npfctl_conn_print, &f);
+	return 0;
+}
+
+static int
+npfctl_open_dev(const char *path)
+{
+	int fd, kernver;
+
+	fd = open(path, O_RDONLY);
+	if (fd == -1) {
+		err(EXIT_FAILURE, "cannot open '%s'", path);
+	}
+	if (ioctl(fd, IOC_NPF_VERSION, &kernver) == -1) {
+		err(EXIT_FAILURE, "ioctl(IOC_NPF_VERSION)");
+	}
+	if (kernver != NPF_VERSION) {
+		errx(EXIT_FAILURE,
+		    "incompatible NPF interface version (%d, kernel %d)\n"
+		    "Hint: update %s?", NPF_VERSION, kernver,
+		    kernver > NPF_VERSION ? "userland" : "kernel");
+	}
+	return fd;
+}
+
 static void
 npfctl(int action, int argc, char **argv)
 {
-	int fd, ver, boolval, ret = 0;
-
-	fd = open(NPF_DEV_PATH, O_RDONLY);
-	if (fd == -1) {
-		err(EXIT_FAILURE, "cannot open '%s'", NPF_DEV_PATH);
-	}
-	if (ioctl(fd, IOC_NPF_VERSION, &ver) == -1) {
-		err(EXIT_FAILURE, "ioctl(IOC_NPF_VERSION)");
-	}
-	if (ver != NPF_VERSION) {
-		errx(EXIT_FAILURE,
-		    "incompatible NPF interface version (%d, kernel %d)\n"
-		    "Hint: update userland?", NPF_VERSION, ver);
-	}
-
+	int fd, boolval, ret = 0;
 	const char *fun = "";
+	nl_config_t *ncf;
+
+	switch (action) {
+	case NPFCTL_VALIDATE:
+	case NPFCTL_DEBUG:
+		fd = 0;
+		break;
+	default:
+		fd = npfctl_open_dev(NPF_DEV_PATH);
+	}
+
 	switch (action) {
 	case NPFCTL_START:
 		boolval = true;
@@ -593,7 +845,7 @@ npfctl(int action, int argc, char **argv)
 		npfctl_config_init(false);
 		npfctl_parse_file(argc < 3 ? NPF_CONF_PATH : argv[2]);
 		npfctl_preload_bpfjit();
-		errno = ret = npfctl_config_send(fd, NULL);
+		errno = ret = npfctl_config_send(fd);
 		fun = "npfctl_config_send";
 		break;
 	case NPFCTL_SHOWCONF:
@@ -604,18 +856,16 @@ npfctl(int action, int argc, char **argv)
 		ret = npf_config_flush(fd);
 		fun = "npf_config_flush";
 		break;
-	case NPFCTL_VALIDATE:
-		npfctl_config_init(false);
-		npfctl_parse_file(argc < 3 ? NPF_CONF_PATH : argv[2]);
-		ret = npfctl_config_show(0);
-		fun = "npfctl_config_show";
-		break;
 	case NPFCTL_TABLE:
 		if ((argc -= 2) < 2) {
 			usage();
 		}
 		argv += 2;
-		npfctl_table(fd, argc, argv);
+		if (strcmp(argv[1], "replace") == 0) {
+			npfctl_table_replace(fd, argc, argv);
+		} else {
+			npfctl_table(fd, argc, argv);
+		}
 		break;
 	case NPFCTL_RULE:
 		if ((argc -= 2) < 2) {
@@ -630,18 +880,41 @@ npfctl(int action, int argc, char **argv)
 		fun = "npfctl_config_load";
 		break;
 	case NPFCTL_SAVE:
-		fd = npfctl_save(fd);
+		ncf = npf_config_retrieve(fd);
+		if (ncf) {
+			npfctl_config_save(ncf, NPF_DB_PATH);
+			npf_config_destroy(ncf);
+		} else {
+			ret = errno;
+		}
 		fun = "npfctl_config_save";
 		break;
 	case NPFCTL_STATS:
 		ret = npfctl_print_stats(fd);
 		fun = "npfctl_print_stats";
 		break;
+	case NPFCTL_CONN_LIST:
+		ret = npfctl_conn_list(fd, argc, argv);
+		fun = "npfctl_conn_list";
+		break;
+	case NPFCTL_VALIDATE:
+		npfctl_config_init(false);
+		npfctl_parse_file(argc > 2 ? argv[2] : NPF_CONF_PATH);
+		ret = npfctl_config_show(0);
+		fun = "npfctl_config_show";
+		break;
+	case NPFCTL_DEBUG:
+		npfctl_config_init(true);
+		npfctl_parse_file(argc > 2 ? argv[2] : NPF_CONF_PATH);
+		npfctl_config_debug(argc > 3 ? argv[3] : "/tmp/npf.nvlist");
+		break;
 	}
 	if (ret) {
 		err(EXIT_FAILURE, "%s", fun);
 	}
-	close(fd);
+	if (fd) {
+		close(fd);
+	}
 }
 
 int
@@ -652,17 +925,8 @@ main(int argc, char **argv)
 	if (argc < 2) {
 		usage();
 	}
+	npfctl_show_init();
 	cmd = argv[1];
-
-	if (strcmp(cmd, "debug") == 0) {
-		const char *cfg = argc > 2 ? argv[2] : "/etc/npf.conf";
-		const char *out = argc > 3 ? argv[3] : "/tmp/npf.plist";
-
-		npfctl_config_init(true);
-		npfctl_parse_file(cfg);
-		npfctl_config_send(0, out);
-		return EXIT_SUCCESS;
-	}
 
 	/* Find and call the subroutine. */
 	for (int n = 0; operations[n].cmd != NULL; n++) {

@@ -1,4 +1,4 @@
-/* $NetBSD: genfb_machdep.c,v 1.11 2013/07/25 15:09:27 macallan Exp $ */
+/* $NetBSD: genfb_machdep.c,v 1.13.2.1 2019/12/08 13:09:28 martin Exp $ */
 
 /*-
  * Copyright (c) 2009 Jared D. McNeill <jmcneill@invisible.ca>
@@ -31,7 +31,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: genfb_machdep.c,v 1.11 2013/07/25 15:09:27 macallan Exp $");
+__KERNEL_RCSID(0, "$NetBSD: genfb_machdep.c,v 1.13.2.1 2019/12/08 13:09:28 martin Exp $");
 
 #include "opt_mtrr.h"
 
@@ -40,6 +40,7 @@ __KERNEL_RCSID(0, "$NetBSD: genfb_machdep.c,v 1.11 2013/07/25 15:09:27 macallan 
 #include <sys/device.h>
 #include <sys/ioctl.h>
 #include <sys/kernel.h>
+#include <sys/kmem.h>
 #include <sys/lwp.h>
 
 #include <sys/bus.h>
@@ -61,6 +62,7 @@ __KERNEL_RCSID(0, "$NetBSD: genfb_machdep.c,v 1.11 2013/07/25 15:09:27 macallan 
 
 #if NWSDISPLAY > 0 && NGENFB > 0
 struct vcons_screen x86_genfb_console_screen;
+bool x86_genfb_use_shadowfb = true;
 
 #if NACPICA > 0
 extern int acpi_md_vesa_modenum;
@@ -134,23 +136,19 @@ x86_genfb_mtrr_init(uint64_t physaddr, uint32_t size)
 }
 
 int
-x86_genfb_cnattach(void)
+x86_genfb_init(void)
 {
-	static int ncalls = 0;
+	static int inited, attached;
 	struct rasops_info *ri = &x86_genfb_console_screen.scr_ri;
 	const struct btinfo_framebuffer *fbinfo;
 	bus_space_tag_t t = x86_bus_space_mem;
 	bus_space_handle_t h;
 	void *bits;
-	long defattr;
 	int err;
 
-	/* XXX jmcneill
-	 *  Defer console initialization until UVM is initialized
-	 */
-	++ncalls;
-	if (ncalls < 3)
-		return -1;
+	if (inited)
+		return attached;
+	inited = 1;
 
 	memset(&x86_genfb_console_screen, 0, sizeof(x86_genfb_console_screen));
 
@@ -182,9 +180,19 @@ x86_genfb_cnattach(void)
 	ri->ri_height = fbinfo->height;
 	ri->ri_depth = fbinfo->depth;
 	ri->ri_stride = fbinfo->stride;
-	ri->ri_bits = bits;
+	if (x86_genfb_use_shadowfb && lookup_bootinfo(BTINFO_EFI) != NULL) {
+		/* XXX The allocated memory is never released... */
+		ri->ri_bits = kmem_alloc(ri->ri_stride * ri->ri_height,
+		    KM_NOSLEEP);
+		if (ri->ri_bits == NULL) {
+			aprint_error("%s: couldn't alloc shadowfb\n", __func__);
+			ri->ri_bits = bits;
+		} else
+			ri->ri_hwbits = bits;
+	} else
+		ri->ri_bits = bits;
 	ri->ri_flg = RI_CENTER | RI_FULLCLEAR | RI_CLEAR;
-	rasops_init(ri, ri->ri_width / 8, ri->ri_height / 8);
+	rasops_init(ri, ri->ri_height / 8, ri->ri_width / 8);
 	ri->ri_caps = WSSCREEN_WSCOLORS;
 	rasops_reconfig(ri, ri->ri_height / ri->ri_font->fontheight,
 	    ri->ri_width / ri->ri_font->fontwidth);
@@ -194,12 +202,39 @@ x86_genfb_cnattach(void)
 	x86_genfb_stdscreen.textops = &ri->ri_ops;
 	x86_genfb_stdscreen.capabilities = ri->ri_caps;
 
+	attached = 1;
+	return 1;
+}
+
+int
+x86_genfb_cnattach(void)
+{
+	static int ncalls = 0;
+	struct rasops_info *ri = &x86_genfb_console_screen.scr_ri;
+	long defattr;
+
+	/* XXX jmcneill
+	 *  Defer console initialization until UVM is initialized
+	 */
+	++ncalls;
+	if (ncalls < 3)
+		return -1;
+
+	if (!x86_genfb_init())
+		return 0;
+
 	ri->ri_ops.allocattr(ri, 0, 0, 0, &defattr);
 	wsdisplay_preattach(&x86_genfb_stdscreen, ri, 0, 0, defattr);
 
 	return 1;
 }
 #else	/* NWSDISPLAY > 0 && NGENFB > 0 */
+int
+x86_genfb_init(void)
+{
+	return 0;
+}
+
 int
 x86_genfb_cnattach(void)
 {

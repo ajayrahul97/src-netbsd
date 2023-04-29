@@ -1,4 +1,4 @@
-/*	$NetBSD: vfs_syscalls_50.c,v 1.18 2014/09/05 09:21:54 matt Exp $	*/
+/*	$NetBSD: vfs_syscalls_50.c,v 1.23.2.1 2019/12/18 20:04:32 martin Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -15,13 +15,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *        This product includes software developed by the NetBSD
- *        Foundation, Inc. and its contributors.
- * 4. Neither the name of The NetBSD Foundation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
@@ -36,7 +29,12 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_50.c,v 1.18 2014/09/05 09:21:54 matt Exp $");
+__KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_50.c,v 1.23.2.1 2019/12/18 20:04:32 martin Exp $");
+
+#if defined(_KERNEL_OPT)
+#include "opt_compat_netbsd.h"
+#include "opt_quota.h"
+#endif
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -53,6 +51,9 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_50.c,v 1.18 2014/09/05 09:21:54 matt Ex
 #include <sys/dirent.h>
 #include <sys/kauth.h>
 #include <sys/time.h>
+#include <sys/syscall.h>
+#include <sys/syscallvar.h>
+#include <sys/syscallargs.h>
 #include <sys/vfs_syscalls.h>
 #ifndef LFS
 #define LFS
@@ -61,17 +62,37 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_50.c,v 1.18 2014/09/05 09:21:54 matt Ex
 
 #include <ufs/lfs/lfs_extern.h>
 
+#ifdef QUOTA
 #include <sys/quota.h>
 #include <sys/quotactl.h>
 #include <ufs/ufs/quota1.h>
+#endif
 
 #include <compat/common/compat_util.h>
+#include <compat/common/compat_mod.h>
 #include <compat/sys/time.h>
 #include <compat/sys/stat.h>
 #include <compat/sys/dirent.h>
 #include <compat/sys/mount.h>
 
 static void cvtstat(struct stat30 *, const struct stat *);
+
+static const struct syscall_package vfs_syscalls_50_syscalls[] = {
+	{ SYS_compat_50___stat30, 0, (sy_call_t *)compat_50_sys___stat30 },
+	{ SYS_compat_50___fstat30, 0, (sy_call_t *)compat_50_sys___fstat30 },
+	{ SYS_compat_50___lstat30, 0, (sy_call_t *)compat_50_sys___lstat30 },
+	{ SYS_compat_50___fhstat40, 0, (sy_call_t *)compat_50_sys___fhstat40 },
+	{ SYS_compat_50_utimes, 0, (sy_call_t *)compat_50_sys_utimes },
+	{ SYS_compat_50_lfs_segwait, 0,
+	    (sy_call_t *)compat_50_sys_lfs_segwait } ,
+	{ SYS_compat_50_futimes, 0, (sy_call_t *)compat_50_sys_futimes },
+	{ SYS_compat_50_lutimes, 0, (sy_call_t *)compat_50_sys_lutimes },
+	{ SYS_compat_50_mknod, 0, (sy_call_t *)compat_50_sys_mknod },
+#ifdef QUOTA
+	{ SYS_compat_50_quotactl, 0, (sy_call_t *)compat_50_sys_quotactl },
+#endif
+	{ 0, 0, NULL }
+};
 
 /*
  * Convert from a new to an old stat structure.
@@ -276,6 +297,7 @@ compat_50_sys_lfs_segwait(struct lwp *l,
 		syscallarg(struct timeval50 *) tv;
 	} */
 #ifdef notyet
+/* XXX need to check presence of LFS at run-time XXX */
 	struct timeval atv;
 	struct timeval50 atv50;
 	fsid_t fsid;
@@ -314,9 +336,10 @@ compat_50_sys_mknod(struct lwp *l,
 		syscallarg(uint32_t) dev;
 	} */
 	return do_sys_mknod(l, SCARG(uap, path), SCARG(uap, mode),
-	    SCARG(uap, dev), retval, UIO_USERSPACE);
+	    SCARG(uap, dev), UIO_USERSPACE);
 }
 
+#ifdef QUOTA
 /* ARGSUSED */
 int   
 compat_50_sys_quotactl(struct lwp *l, const struct compat_50_sys_quotactl_args *uap, register_t *retval)
@@ -426,3 +449,18 @@ compat_50_sys_quotactl(struct lwp *l, const struct compat_50_sys_quotactl_args *
 	vrele(vp);
 	return error;
 }
+#endif
+
+int             
+vfs_syscalls_50_init(void)
+{               
+        
+        return syscall_establish(NULL, vfs_syscalls_50_syscalls);
+}       
+        
+int
+vfs_syscalls_50_fini(void)
+{               
+
+        return syscall_disestablish(NULL, vfs_syscalls_50_syscalls);
+}         

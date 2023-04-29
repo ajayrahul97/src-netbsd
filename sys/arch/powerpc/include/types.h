@@ -1,4 +1,4 @@
-/*	$NetBSD: types.h,v 1.54 2016/01/24 19:49:35 christos Exp $	*/
+/*	$NetBSD: types.h,v 1.59 2019/04/07 05:25:55 thorpej Exp $	*/
 
 /*-
  * Copyright (C) 1995 Wolfgang Solfrank.
@@ -31,8 +31,8 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef	_MACHTYPES_H_
-#define	_MACHTYPES_H_
+#ifndef	_POWERPC_TYPES_H_
+#define	_POWERPC_TYPES_H_
 
 #include <sys/cdefs.h>
 #include <sys/featuretest.h>
@@ -87,6 +87,8 @@ typedef __uint32_t tlb_asid_t;		/* for booke */
 #define	__HAVE___LWP_GETTCB_FAST
 #define	__HAVE___LWP_SETTCB
 #define	__HAVE_TLS_VARIANT_I
+#define	__OPENFIRMIO_OPEN_CHECK_BROKEN
+int __openfirmio_open_check_broken(void);
 
 #if defined(_KERNEL) || defined(_KMEMUSER)
 #define	PCU_FPU		0	/* FPU */
@@ -96,8 +98,11 @@ typedef __uint32_t tlb_asid_t;		/* for booke */
 
 #define	__HAVE_MM_MD_DIRECT_MAPPED_PHYS
 #define	__HAVE_MM_MD_KERNACC
+#if 0	/* XXX CPU configuration spaghetti */
+#define	__HAVE_UCAS_FULL
+#endif
 #if defined(_KERNEL)
 #define	__HAVE_RAS
 #endif
 
-#endif	/* _MACHTYPES_H_ */
+#endif	/* _POWERPC_TYPES_H_ */

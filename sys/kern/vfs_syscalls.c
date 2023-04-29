@@ -1,4 +1,4 @@
-/*	$NetBSD: vfs_syscalls.c,v 1.504 2015/11/28 15:26:29 dholland Exp $	*/
+/*	$NetBSD: vfs_syscalls.c,v 1.533 2019/07/06 14:37:24 maxv Exp $	*/
 
 /*-
  * Copyright (c) 2008, 2009 The NetBSD Foundation, Inc.
@@ -70,7 +70,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: vfs_syscalls.c,v 1.504 2015/11/28 15:26:29 dholland Exp $");
+__KERNEL_RCSID(0, "$NetBSD: vfs_syscalls.c,v 1.533 2019/07/06 14:37:24 maxv Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_fileassoc.h"
@@ -87,6 +87,7 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_syscalls.c,v 1.504 2015/11/28 15:26:29 dholland 
 #include <sys/stat.h>
 #include <sys/vnode.h>
 #include <sys/mount.h>
+#include <sys/fstrans.h>
 #include <sys/proc.h>
 #include <sys/uio.h>
 #include <sys/kmem.h>
@@ -106,6 +107,8 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_syscalls.c,v 1.504 2015/11/28 15:26:29 dholland 
 #include <sys/atomic.h>
 #include <sys/module.h>
 #include <sys/buf.h>
+#include <sys/event.h>
+#include <sys/compat_stub.h>
 
 #include <miscfs/genfs/genfs.h>
 #include <miscfs/specfs/specdev.h>
@@ -138,7 +141,6 @@ static int do_sys_unlinkat(struct lwp *, int, const char *, int, enum uio_seg);
 static int fd_nameiat(struct lwp *, int, struct nameidata *);
 static int fd_nameiat_simple_user(struct lwp *, int, const char *,
     namei_simple_flags_t, struct vnode **);
-
 
 /*
  * This table is used to maintain compatibility with 4.3BSD
@@ -276,15 +278,23 @@ mount_update(struct lwp *l, struct vnode *vp, const char *path, int flags,
 		goto out;
 	}
 
+	/*
+	 * Enabling MNT_UNION requires a covered mountpoint and
+	 * must not happen on the root mount.
+	 */
+	if ((flags & MNT_UNION) != 0 && mp->mnt_vnodecovered == NULLVP) {
+		error = EOPNOTSUPP;
+		goto out;
+	}
+
 	error = kauth_authorize_system(l->l_cred, KAUTH_SYSTEM_MOUNT,
 	    KAUTH_REQ_SYSTEM_MOUNT_UPDATE, mp, KAUTH_ARG(flags), data);
 	if (error)
 		goto out;
 
-	if (vfs_busy(mp, NULL)) {
-		error = EPERM;
+	error = vfs_suspend(mp, 0);
+	if (error)
 		goto out;
-	}
 
 	mutex_enter(&mp->mnt_updating);
 
@@ -294,12 +304,17 @@ mount_update(struct lwp *l, struct vnode *vp, const char *path, int flags,
 	/*
 	 * Set the mount level flags.
 	 */
-	if (flags & MNT_RDONLY)
-		mp->mnt_flag |= MNT_RDONLY;
-	else if (mp->mnt_flag & MNT_RDONLY)
-		mp->mnt_iflag |= IMNT_WANTRDWR;
+	if ((flags & MNT_RDONLY) != (mp->mnt_flag & MNT_RDONLY)) {
+		if ((flags & MNT_RDONLY))
+			mp->mnt_iflag |= IMNT_WANTRDONLY;
+		else
+			mp->mnt_iflag |= IMNT_WANTRDWR;
+	}
 	mp->mnt_flag &= ~MNT_BASIC_FLAGS;
 	mp->mnt_flag |= flags & MNT_BASIC_FLAGS;
+	if ((mp->mnt_iflag & IMNT_WANTRDONLY))
+		mp->mnt_flag &= ~MNT_RDONLY;
+
 	error = VFS_MOUNT(mp, path, data, data_len);
 
 	if (error && data != NULL) {
@@ -320,12 +335,12 @@ mount_update(struct lwp *l, struct vnode *vp, const char *path, int flags,
 			error = error2;
 	}
 
-	if (mp->mnt_iflag & IMNT_WANTRDWR)
-		mp->mnt_flag &= ~MNT_RDONLY;
+	if (error == 0 && (mp->mnt_iflag & IMNT_WANTRDONLY))
+		mp->mnt_flag |= MNT_RDONLY;
 	if (error)
 		mp->mnt_flag = saved_flags;
 	mp->mnt_flag &= ~MNT_OP_FLAGS;
-	mp->mnt_iflag &= ~IMNT_WANTRDWR;
+	mp->mnt_iflag &= ~(IMNT_WANTRDONLY | IMNT_WANTRDWR);
 	if ((mp->mnt_flag & (MNT_RDONLY | MNT_ASYNC)) == 0) {
 		if ((mp->mnt_iflag & IMNT_ONWORKLIST) == 0)
 			vfs_syncer_add_to_worklist(mp);
@@ -334,7 +349,7 @@ mount_update(struct lwp *l, struct vnode *vp, const char *path, int flags,
 			vfs_syncer_remove_from_worklist(mp);
 	}
 	mutex_exit(&mp->mnt_updating);
-	vfs_unbusy(mp, false, NULL);
+	vfs_resume(mp);
 
 	if ((error == 0) && !(saved_flags & MNT_EXTATTR) && 
 	    (flags & MNT_EXTATTR)) {
@@ -427,7 +442,7 @@ mount_getargs(struct lwp *l, struct vnode *vp, const char *path, int flags,
 	if ((vp->v_vflag & VV_ROOT) == 0)
 		return EINVAL;
 
-	if (vfs_busy(mp, NULL))
+	if (vfs_busy(mp))
 		return EPERM;
 
 	mutex_enter(&mp->mnt_updating);
@@ -437,7 +452,7 @@ mount_getargs(struct lwp *l, struct vnode *vp, const char *path, int flags,
 	mp->mnt_flag &= ~MNT_OP_FLAGS;
 	mutex_exit(&mp->mnt_updating);
 
-	vfs_unbusy(mp, false, NULL);
+	vfs_unbusy(mp);
 	return (error);
 }
 
@@ -538,6 +553,8 @@ do_sys_mount(struct lwp *l, const char *type, enum uio_seg type_seg,
 		    &data_len);
 		vfsopsrele = false;
 	}
+	if (!error)
+		KNOTE(&fs_klist, VQ_MOUNT);
 
     done:
 	if (vfsopsrele)
@@ -584,14 +601,14 @@ sys_unmount(struct lwp *l, const struct sys_unmount_args *uap, register_t *retva
 	pathbuf_destroy(pb);
 
 	mp = vp->v_mount;
-	atomic_inc_uint(&mp->mnt_refcnt);
+	vfs_ref(mp);
 	VOP_UNLOCK(vp);
 
 	error = kauth_authorize_system(l->l_cred, KAUTH_SYSTEM_MOUNT,
 	    KAUTH_REQ_SYSTEM_MOUNT_UNMOUNT, mp, NULL, NULL);
 	if (error) {
 		vrele(vp);
-		vfs_destroy(mp);
+		vfs_rele(mp);
 		return (error);
 	}
 
@@ -600,7 +617,7 @@ sys_unmount(struct lwp *l, const struct sys_unmount_args *uap, register_t *retva
 	 */
 	if (mp->mnt_flag & MNT_ROOTFS) {
 		vrele(vp);
-		vfs_destroy(mp);
+		vfs_rele(mp);
 		return (EINVAL);
 	}
 
@@ -609,13 +626,15 @@ sys_unmount(struct lwp *l, const struct sys_unmount_args *uap, register_t *retva
 	 */
 	if ((vp->v_vflag & VV_ROOT) == 0) {
 		vrele(vp);
-		vfs_destroy(mp);
+		vfs_rele(mp);
 		return (EINVAL);
 	}
 
 	vrele(vp);
 	error = dounmount(mp, SCARG(uap, flags), l);
-	vfs_destroy(mp);
+	vfs_rele(mp);
+	if (!error)
+		KNOTE(&fs_klist, VQ_UNMOUNT);
 	return error;
 }
 
@@ -630,14 +649,12 @@ struct ctldebug debug0 = { "syncprt", &syncprt };
 void
 do_sys_sync(struct lwp *l)
 {
-	struct mount *mp, *nmp;
+	mount_iterator_t *iter;
+	struct mount *mp;
 	int asyncflag;
 
-	mutex_enter(&mountlist_lock);
-	for (mp = TAILQ_FIRST(&mountlist); mp != NULL; mp = nmp) {
-		if (vfs_busy(mp, &nmp)) {
-			continue;
-		}
+	mountlist_iterator_init(&iter);
+	while ((mp = mountlist_iterator_next(iter)) != NULL) {
 		mutex_enter(&mp->mnt_updating);
 		if ((mp->mnt_flag & MNT_RDONLY) == 0) {
 			asyncflag = mp->mnt_flag & MNT_ASYNC;
@@ -647,9 +664,8 @@ do_sys_sync(struct lwp *l)
 				 mp->mnt_flag |= MNT_ASYNC;
 		}
 		mutex_exit(&mp->mnt_updating);
-		vfs_unbusy(mp, false, &nmp);
 	}
-	mutex_exit(&mountlist_lock);
+	mountlist_iterator_destroy(iter);
 #ifdef DEBUG
 	if (syncprt)
 		vfs_bufstats();
@@ -1238,39 +1254,32 @@ do_sys_getvfsstat(struct lwp *l, void *sfsp, size_t bufsize, int flags,
     register_t *retval)
 {
 	int root = 0;
+	mount_iterator_t *iter;
 	struct proc *p = l->l_proc;
-	struct mount *mp, *nmp;
+	struct mount *mp;
 	struct statvfs *sb;
 	size_t count, maxcount;
 	int error = 0;
 
 	sb = STATVFSBUF_GET();
 	maxcount = bufsize / entry_sz;
-	mutex_enter(&mountlist_lock);
 	count = 0;
-	for (mp = TAILQ_FIRST(&mountlist); mp != NULL; mp = nmp) {
-		if (vfs_busy(mp, &nmp)) {
-			continue;
-		}
+	mountlist_iterator_init(&iter);
+	while ((mp = mountlist_iterator_next(iter)) != NULL) {
 		if (sfsp && count < maxcount) {
 			error = dostatvfs(mp, sb, l, flags, 0);
 			if (error) {
-				vfs_unbusy(mp, false, &nmp);
 				error = 0;
 				continue;
 			}
 			error = copyfn(sb, sfsp, entry_sz);
-			if (error) {
-				vfs_unbusy(mp, false, NULL);
+			if (error)
 				goto out;
-			}
 			sfsp = (char *)sfsp + entry_sz;
 			root |= strcmp(sb->f_mntonname, "/") == 0;
 		}
 		count++;
-		vfs_unbusy(mp, false, &nmp);
 	}
-	mutex_exit(&mountlist_lock);
 
 	if (root == 0 && p->p_cwdi->cwdi_rdir) {
 		/*
@@ -1292,6 +1301,7 @@ do_sys_getvfsstat(struct lwp *l, void *sfsp, size_t bufsize, int flags,
 	else
 		*retval = count;
 out:
+	mountlist_iterator_destroy(iter);
 	STATVFSBUF_PUT(sb);
 	return error;
 }
@@ -1343,12 +1353,12 @@ sys_fchdir(struct lwp *l, const struct sys_fchdir_args *uap, register_t *retval)
 		goto out;
 	}
 	while ((mp = vp->v_mountedhere) != NULL) {
-		error = vfs_busy(mp, NULL);
+		error = vfs_busy(mp);
 		vput(vp);
 		if (error != 0)
 			goto out;
 		error = VFS_ROOT(mp, &tdp);
-		vfs_unbusy(mp, false, NULL);
+		vfs_unbusy(mp);
 		if (error)
 			goto out;
 		vp = tdp;
@@ -1623,10 +1633,6 @@ fd_open(const char *path, int open_flags, int open_mode, int *fd)
 	return error;
 }
 
-/*
- * Check permissions, allocate an open file structure,
- * and call the device open routine if any.
- */
 static int
 do_sys_openat(lwp_t *l, int fdat, const char *path, int flags,
     int mode, int *fd)
@@ -1634,22 +1640,30 @@ do_sys_openat(lwp_t *l, int fdat, const char *path, int flags,
 	file_t *dfp = NULL;
 	struct vnode *dvp = NULL;
 	struct pathbuf *pb;
+	const char *pathstring = NULL;
 	int error;
 
-#ifdef COMPAT_10	/* XXX: and perhaps later */
 	if (path == NULL) {
-		pb = pathbuf_create(".");
-		if (pb == NULL)
-			return ENOMEM;
-	} else
-#endif
-	{
+		MODULE_HOOK_CALL(vfs_openat_10_hook, (&pb), enosys(), error);
+		if (error == ENOSYS)
+			goto no_compat;
+		if (error)
+			return error;
+	} else {
+no_compat:
 		error = pathbuf_copyin(path, &pb);
 		if (error)
 			return error;
 	}
 
-	if (fdat != AT_FDCWD) {
+	pathstring = pathbuf_stringcopy_get(pb);
+
+	/* 
+	 * fdat is ignored if:
+	 * 1) if fdat is AT_FDCWD, which means use current directory as base.
+	 * 2) if path is absolute, then fdat is useless.
+	 */
+	if (fdat != AT_FDCWD && pathstring[0] != '/') {
 		/* fd_getvnode() will use the descriptor for us */
 		if ((error = fd_getvnode(fdat, &dfp)) != 0)
 			goto out;
@@ -1662,6 +1676,7 @@ do_sys_openat(lwp_t *l, int fdat, const char *path, int flags,
 	if (dfp != NULL)
 		fd_putfile(fdat);
 out:
+	pathbuf_stringcopy_put(pb, pathstring);
 	pathbuf_destroy(pb);
 	return error;
 }
@@ -1768,10 +1783,6 @@ vfs_composefh_alloc(struct vnode *vp, fhandle_t **fhpp)
 	}
 	fhsize = FHANDLE_SIZE_FROM_FILEID_SIZE(fidsize);
 	fhp = kmem_zalloc(fhsize, KM_SLEEP);
-	if (fhp == NULL) {
-		error = ENOMEM;
-		goto out;
-	}
 	fhp->fh_fsid = mp->mnt_stat.f_fsidx;
 	error = VFS_VPTOFH(vp, &fhp->fh_fid, &fidsize);
 	if (error == 0) {
@@ -1836,9 +1847,6 @@ vfs_copyinfh_alloc(const void *ufhp, size_t fhsize, fhandle_t **fhpp)
 	}
 again:
 	fhp = kmem_alloc(fhsize, KM_SLEEP);
-	if (fhp == NULL) {
-		return ENOMEM;
-	}
 	error = copyin(ufhp, fhp, fhsize);
 	if (error == 0) {
 		/* XXX this check shouldn't be here */
@@ -2143,6 +2151,25 @@ sys___fhstatvfs140(struct lwp *l, const struct sys___fhstatvfs140_args *uap, reg
 	return error;
 }
 
+int
+do_posix_mknodat(struct lwp *l, int fdat, const char *pathname, mode_t mode,
+    dev_t dev)
+{
+
+	/*
+	 * The POSIX mknod(2) call is an alias for mkfifo(2) for S_IFIFO
+	 * in mode and dev=0.
+	 *
+	 * In all the other cases it's implementation defined behavior.
+	 */
+
+	if ((mode & S_IFIFO) && dev == 0)
+		return do_sys_mkfifoat(l, fdat, pathname, mode);
+	else
+		return do_sys_mknodat(l, fdat, pathname, mode, dev,
+		    UIO_USERSPACE);
+}
+
 /*
  * Create a special file.
  */
@@ -2156,8 +2183,8 @@ sys___mknod50(struct lwp *l, const struct sys___mknod50_args *uap,
 		syscallarg(mode_t) mode;
 		syscallarg(dev_t) dev;
 	} */
-	return do_sys_mknodat(l, AT_FDCWD, SCARG(uap, path), SCARG(uap, mode),
-	    SCARG(uap, dev), retval, UIO_USERSPACE);
+	return do_posix_mknodat(l, AT_FDCWD, SCARG(uap, path),
+	    SCARG(uap, mode), SCARG(uap, dev));
 }
 
 int
@@ -2172,20 +2199,20 @@ sys_mknodat(struct lwp *l, const struct sys_mknodat_args *uap,
 		syscallarg(dev_t) dev;
 	} */
 
-	return do_sys_mknodat(l, SCARG(uap, fd), SCARG(uap, path), 
-	    SCARG(uap, mode), SCARG(uap, dev), retval, UIO_USERSPACE);
+	return do_posix_mknodat(l, SCARG(uap, fd), SCARG(uap, path),
+	    SCARG(uap, mode), SCARG(uap, dev));
 }
 
 int
 do_sys_mknod(struct lwp *l, const char *pathname, mode_t mode, dev_t dev,
-    register_t *retval, enum uio_seg seg)
+    enum uio_seg seg)
 {
-	return do_sys_mknodat(l, AT_FDCWD, pathname, mode, dev, retval, seg);
+	return do_sys_mknodat(l, AT_FDCWD, pathname, mode, dev, seg);
 }
 
 int
 do_sys_mknodat(struct lwp *l, int fdat, const char *pathname, mode_t mode,
-    dev_t dev, register_t *retval, enum uio_seg seg)
+    dev_t dev, enum uio_seg seg)
 {
 	struct proc *p = l->l_proc;
 	struct vnode *vp;
@@ -2477,6 +2504,7 @@ do_sys_symlinkat(struct lwp *l, const char *patharg, int fdat,
 	struct vattr vattr;
 	char *path;
 	int error;
+	size_t len;
 	struct pathbuf *linkpb;
 	struct nameidata nd;
 
@@ -2484,20 +2512,21 @@ do_sys_symlinkat(struct lwp *l, const char *patharg, int fdat,
 
 	path = PNBUF_GET();
 	if (seg == UIO_USERSPACE) {
-		if ((error = copyinstr(patharg, path, MAXPATHLEN, NULL)) != 0)
+		if ((error = copyinstr(patharg, path, MAXPATHLEN, &len)) != 0)
 			goto out1;
 		if ((error = pathbuf_copyin(link, &linkpb)) != 0)
 			goto out1;
 	} else {
-		KASSERT(strlen(patharg) < MAXPATHLEN);
-		strcpy(path, patharg);
+		len = strlen(patharg) + 1;
+		KASSERT(len <= MAXPATHLEN);
+		memcpy(path, patharg, len);
 		linkpb = pathbuf_create(link);
 		if (linkpb == NULL) {
 			error = ENOMEM;
 			goto out1;
 		}
 	}
-	ktrkuser("symlink-target", path, strlen(path));
+	ktrkuser("symlink-target", path, len - 1);
 
 	NDINIT(&nd, CREATE, LOCKPARENT | TRYEMULROOT, linkpb);
 	if ((error = fd_nameiat(l, fdat, &nd)) != 0)
@@ -2692,6 +2721,7 @@ do_sys_unlinkat(struct lwp *l, int fdat, const char *arg, int flags,
 			goto abort;
 		} else {
 			error = VOP_RMDIR(nd.ni_dvp, nd.ni_vp, &nd.ni_cnd);
+			vput(nd.ni_dvp);
 			goto out;
 		}
 	}
@@ -2715,6 +2745,7 @@ do_sys_unlinkat(struct lwp *l, int fdat, const char *arg, int flags,
 	(void)fileassoc_file_delete(vp);
 #endif /* FILEASSOC */
 	error = VOP_REMOVE(nd.ni_dvp, nd.ni_vp, &nd.ni_cnd);
+	vput(nd.ni_dvp);
 	goto out;
 
 abort:
@@ -3882,21 +3913,21 @@ do_sys_utimes(struct lwp *l, struct vnode *vp, const char *path, int flag,
 		struct timeval tv[2];
 
 		if (seg != UIO_SYSSPACE) {
-			error = copyin(tptr, tv, sizeof (tv));
+			error = copyin(tptr, tv, sizeof(tv));
 			if (error != 0)
 				return error;
 			tptr = tv;
 		}
 
-		if ((tv[0].tv_usec == UTIME_NOW) || 
-		    (tv[0].tv_usec == UTIME_OMIT))
-			ts[0].tv_nsec = tv[0].tv_usec;
+		if ((tptr[0].tv_usec == UTIME_NOW) || 
+		    (tptr[0].tv_usec == UTIME_OMIT))
+			ts[0].tv_nsec = tptr[0].tv_usec;
 		else
 			TIMEVAL_TO_TIMESPEC(&tptr[0], &ts[0]);
 
-		if ((tv[1].tv_usec == UTIME_NOW) || 
-		    (tv[1].tv_usec == UTIME_OMIT))
-			ts[1].tv_nsec = tv[1].tv_usec;
+		if ((tptr[1].tv_usec == UTIME_NOW) || 
+		    (tptr[1].tv_usec == UTIME_OMIT))
+			ts[1].tv_nsec = tptr[1].tv_usec;
 		else
 			TIMEVAL_TO_TIMESPEC(&tptr[1], &ts[1]);
 
@@ -4212,9 +4243,18 @@ do_sys_renameat(struct lwp *l, int fromfd, const char *from, int tofd,
 	 */
 	fdvp = fnd.ni_dvp;
 	fvp = fnd.ni_vp;
+	mp = fdvp->v_mount;
 	KASSERT(fdvp != NULL);
 	KASSERT(fvp != NULL);
 	KASSERT((fdvp == fvp) || (VOP_ISLOCKED(fdvp) == LK_EXCLUSIVE));
+	/*
+	 * Bracket the operation with fstrans_start()/fstrans_done().
+	 *
+	 * Inside the bracket this file system cannot be unmounted so
+	 * a vnode on this file system cannot change its v_mount.
+	 * A vnode on another file system may still change to dead mount.
+	 */
+	fstrans_start(mp);
 
 	/*
 	 * Make sure neither fdvp nor fvp is locked.
@@ -4299,38 +4339,16 @@ do_sys_renameat(struct lwp *l, int fromfd, const char *from, int tofd,
 	}
 
 	/*
-	 * Get the mount point.  If the file system has been unmounted,
-	 * which it may be because we're not holding any vnode locks,
-	 * then v_mount will be NULL.  We're not really supposed to
-	 * read v_mount without holding the vnode lock, but since we
-	 * have fdvp referenced, if fdvp->v_mount changes then at worst
-	 * it will be set to NULL, not changed to another mount point.
-	 * And, of course, since it is up to the file system to
-	 * determine the real lock order, we can't lock both fdvp and
-	 * tdvp at the same time.
-	 */
-	mp = fdvp->v_mount;
-	if (mp == NULL) {
-		error = ENOENT;
-		goto abort1;
-	}
-
-	/*
-	 * Make sure the mount points match.  Again, although we don't
-	 * hold any vnode locks, the v_mount fields may change -- but
-	 * at worst they will change to NULL, so this will never become
-	 * a cross-device rename, because we hold vnode references.
+	 * Make sure the mount points match.  Although we don't hold
+	 * any vnode locks, the v_mount on fdvp file system are stable.
 	 *
-	 * XXX Because nothing is locked and the compiler may reorder
-	 * things here, unmounting the file system at an inopportune
-	 * moment may cause rename to fail with ENXDEV when it really
-	 * should fail with ENOENT.
+	 * Unmounting another file system at an inopportune moment may
+	 * cause tdvp to disappear and change its v_mount to dead.
+	 *
+	 * So in either case different v_mount means cross-device rename.
 	 */
+	KASSERT(mp != NULL);
 	tmp = tdvp->v_mount;
-	if (tmp == NULL) {
-		error = ENOENT;
-		goto abort1;
-	}
 
 	if (mp != tmp) {
 		error = EXDEV;
@@ -4485,6 +4503,7 @@ do_sys_renameat(struct lwp *l, int fromfd, const char *from, int tofd,
 	 * destroy the pathbufs.
 	 */
 	VFS_RENAMELOCK_EXIT(mp);
+	fstrans_done(mp);
 	goto out2;
 
 abort3:	if ((tvp != NULL) && (tvp != tdvp))
@@ -4498,6 +4517,7 @@ abort1:	VOP_ABORTOP(tdvp, &tnd.ni_cnd);
 abort0:	VOP_ABORTOP(fdvp, &fnd.ni_cnd);
 	vrele(fdvp);
 	vrele(fvp);
+	fstrans_done(mp);
 out2:	pathbuf_destroy(tpb);
 out1:	pathbuf_destroy(fpb);
 out0:	return error;
@@ -4537,7 +4557,7 @@ sys_mkdirat(struct lwp *l, const struct sys_mkdirat_args *uap,
 int
 do_sys_mkdir(const char *path, mode_t mode, enum uio_seg seg)
 {
-	return do_sys_mkdirat(NULL, AT_FDCWD, path, mode, UIO_USERSPACE);
+	return do_sys_mkdirat(NULL, AT_FDCWD, path, mode, seg);
 }
 
 static int

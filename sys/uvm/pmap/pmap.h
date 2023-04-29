@@ -1,4 +1,4 @@
-/*	$NetBSD: pmap.h,v 1.7 2016/07/11 16:06:09 matt Exp $	*/
+/*	$NetBSD: pmap.h,v 1.12 2019/06/01 12:42:28 maxv Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -71,8 +71,8 @@
  *	@(#)pmap.h	8.1 (Berkeley) 6/10/93
  */
 
-#ifndef	_COMMON_PMAP_H_
-#define	_COMMON_PMAP_H_
+#ifndef	_UVM_PMAP_PMAP_H_
+#define	_UVM_PMAP_PMAP_H_
 
 #include <uvm/uvm_stat.h>
 #ifdef UVMHIST
@@ -130,10 +130,13 @@ struct pmap {
 	pmap_segtab_t *		pm_segtab;	/* pointers to pages of PTEs */
 	u_int			pm_count;	/* pmap reference count */
 	u_int			pm_flags;
-#define	PMAP_DEFERRED_ACTIVATE	0x0001
+#define	PMAP_DEFERRED_ACTIVATE	__BIT(0)
 	struct pmap_statistics	pm_stats;	/* pmap statistics */
 	vaddr_t			pm_minaddr;
 	vaddr_t			pm_maxaddr;
+#ifdef __HAVE_PMAP_MD
+	struct pmap_md		pm_md;
+#endif
 	struct pmap_asid_info	pm_pai[1];
 };
 
@@ -154,14 +157,14 @@ struct pmap_limits {
 
 /*
  * Initialize the kernel pmap.
- */      
+ */
 #ifdef MULTIPROCESSOR
 #define PMAP_SIZE	offsetof(struct pmap, pm_pai[PMAP_TLB_MAX])
-#else       
+#else
 #define PMAP_SIZE	sizeof(struct pmap)
-#endif      
+#endif
 
-/* 
+/*
  * The pools from which pmap structures and sub-structures are allocated.
  */
 extern struct pool pmap_pmap_pool;
@@ -218,4 +221,4 @@ struct evcnt pmap_evcnt_##name = \
 EVCNT_ATTACH_STATIC(pmap_evcnt_##name)
 
 #endif	/* _KERNEL */
-#endif	/* _COMMON_PMAP_H_ */
+#endif	/* _UVM_PMAP_PMAP_H_ */

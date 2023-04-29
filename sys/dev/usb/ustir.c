@@ -1,4 +1,4 @@
-/*	$NetBSD: ustir.c,v 1.35 2016/07/07 06:55:42 msaitoh Exp $	*/
+/*	$NetBSD: ustir.c,v 1.40 2019/05/05 03:17:54 mrg Exp $	*/
 
 /*
  * Copyright (c) 2001 The NetBSD Foundation, Inc.
@@ -30,7 +30,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ustir.c,v 1.35 2016/07/07 06:55:42 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ustir.c,v 1.40 2019/05/05 03:17:54 mrg Exp $");
+
+#ifdef _KERNEL_OPT
+#include "opt_usb.h"
+#endif
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -212,7 +216,7 @@ void ustir_attach(device_t, device_t, void *);
 void ustir_childdet(device_t, device_t);
 int ustir_detach(device_t, int);
 int ustir_activate(device_t, enum devact);
-extern struct cfdriver ustir_cd;
+
 CFATTACH_DECL2_NEW(ustir, sizeof(struct ustir_softc), ustir_match,
     ustir_attach, ustir_detach, ustir_activate, NULL, ustir_childdet);
 
@@ -707,7 +711,7 @@ ustir_open(void *h, int flag, int mode,
 		goto bad2;
 	}
 	error = usbd_create_xfer(sc->sc_rd_pipe, IRDA_MAX_FRAME_SIZE,
-	    USBD_SHORT_XFER_OK, 0, &sc->sc_rd_xfer);
+	    0, 0, &sc->sc_rd_xfer);
 	if (error)
 		goto bad3;
 	sc->sc_rd_buf = usbd_get_buffer(sc->sc_rd_xfer);
@@ -720,11 +724,6 @@ ustir_open(void *h, int flag, int mode,
 	sc->sc_wr_buf = usbd_get_buffer(sc->sc_wr_xfer);
 
 	sc->sc_ur_buf = kmem_alloc(IRDA_MAX_FRAME_SIZE, KM_SLEEP);
-	if (sc->sc_ur_buf == NULL) {
-		error = ENOMEM;
-		goto bad5;
-	}
-
 	sc->sc_rd_index = sc->sc_rd_count = 0;
 	sc->sc_closing = 0;
 	sc->sc_rd_readinprogress = 0;
@@ -1088,10 +1087,19 @@ filt_ustirwrite(struct knote *kn, long hint)
 	return sc->sc_direction != udir_input;
 }
 
-static const struct filterops ustirread_filtops =
-	{ 1, NULL, filt_ustirrdetach, filt_ustirread };
-static const struct filterops ustirwrite_filtops =
-	{ 1, NULL, filt_ustirwdetach, filt_ustirwrite };
+static const struct filterops ustirread_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_ustirrdetach,
+	.f_event = filt_ustirread,
+};
+
+static const struct filterops ustirwrite_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_ustirwdetach,
+	.f_event = filt_ustirwrite,
+};
 
 Static int
 ustir_kqfilter(void *h, struct knote *kn)

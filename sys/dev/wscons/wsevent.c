@@ -1,4 +1,4 @@
-/* $NetBSD: wsevent.c,v 1.36 2015/08/24 22:50:33 pooka Exp $ */
+/* $NetBSD: wsevent.c,v 1.42 2019/03/01 11:06:57 pgoyette Exp $ */
 
 /*-
  * Copyright (c) 2006, 2008 The NetBSD Foundation, Inc.
@@ -104,7 +104,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: wsevent.c,v 1.36 2015/08/24 22:50:33 pooka Exp $");
+__KERNEL_RCSID(0, "$NetBSD: wsevent.c,v 1.42 2019/03/01 11:06:57 pgoyette Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_compat_netbsd.h"
@@ -120,6 +120,7 @@ __KERNEL_RCSID(0, "$NetBSD: wsevent.c,v 1.36 2015/08/24 22:50:33 pooka Exp $");
 #include <sys/vnode.h>
 #include <sys/select.h>
 #include <sys/poll.h>
+#include <sys/compat_stub.h>
 
 #include <dev/wscons/wsconsio.h>
 #include <dev/wscons/wseventvar.h>
@@ -188,47 +189,19 @@ wsevent_fini(struct wseventvar *ev)
 	softint_disestablish(ev->sih);
 }
 
-#if defined(COMPAT_50) || defined(MODULAR)
-static int
-wsevent_copyout_events50(const struct wscons_event *events, int cnt,
-    struct uio *uio)
-{
-	int i;
-
-	for (i = 0; i < cnt; i++) {
-		const struct wscons_event *ev = &events[i];
-		struct owscons_event ev50;
-		int error;
-
-		ev50.type = ev->type;
-		ev50.value = ev->value;
-		timespec_to_timespec50(&ev->time, &ev50.time);
-
-		error = uiomove(&ev50, sizeof(ev50), uio);
-		if (error) {
-			return error;
-		}
-	}
-	return 0;
-}
-#else /* defined(COMPAT_50) || defined(MODULAR) */
-static int
-wsevent_copyout_events50(const struct wscons_event *events, int cnt,
-    struct uio *uio)
-{
-
-	return EINVAL;
-}
-#endif /* defined(COMPAT_50) || defined(MODULAR) */
-
 static int
 wsevent_copyout_events(const struct wscons_event *events, int cnt,
     struct uio *uio, int ver)
 {
+	int error;
 
 	switch (ver) {
 	case 0:
-		return wsevent_copyout_events50(events, cnt, uio);
+		MODULE_HOOK_CALL(wscons_copyout_events_50_hook,
+		    (events, cnt, uio), enosys(), error);
+		if (error == ENOSYS)
+			error = EINVAL;
+		return error;
 	case WSEVENT_VERSION:
 		return uiomove(__UNCONST(events), cnt * sizeof(*events), uio);
 	default:
@@ -340,8 +313,12 @@ filt_wseventread(struct knote *kn, long hint)
 	return (1);
 }
 
-static const struct filterops wsevent_filtops =
-	{ 1, NULL, filt_wseventrdetach, filt_wseventread };
+static const struct filterops wsevent_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_wseventrdetach,
+	.f_event = filt_wseventread,
+};
 
 int
 wsevent_kqfilter(struct wseventvar *ev, struct knote *kn)

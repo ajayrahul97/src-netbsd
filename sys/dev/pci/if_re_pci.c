@@ -1,4 +1,4 @@
-/*	$NetBSD: if_re_pci.c,v 1.45 2015/12/14 20:01:17 jakllsch Exp $	*/
+/*	$NetBSD: if_re_pci.c,v 1.49.4.1 2019/11/19 13:10:50 martin Exp $	*/
 
 /*
  * Copyright (c) 1997, 1998-2003
@@ -46,7 +46,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_re_pci.c,v 1.45 2015/12/14 20:01:17 jakllsch Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_re_pci.c,v 1.49.4.1 2019/11/19 13:10:50 martin Exp $");
 
 #include <sys/types.h>
 
@@ -99,6 +99,9 @@ static const struct rtk_type re_devs[] = {
 	{ PCI_VENDOR_REALTEK, PCI_PRODUCT_REALTEK_RT8168,
 	    RTK_8168,
 	    "RealTek 8168/8111 PCIe Gigabit Ethernet" },
+	{ PCI_VENDOR_NCUBE, PCI_PRODUCT_NCUBE_TG3648,
+	    RTK_8168,
+	    "TP-Link TG-3468 v2 (RTL8168) Gigabit Ethernet" },
 	{ PCI_VENDOR_REALTEK, PCI_PRODUCT_REALTEK_RT8169,
 	    RTK_8169,
 	    "RealTek 8169/8110 Gigabit Ethernet" },
@@ -111,6 +114,9 @@ static const struct rtk_type re_devs[] = {
 	{ PCI_VENDOR_DLINK, PCI_PRODUCT_DLINK_DGE528T,
 	    RTK_8169,
 	    "D-Link DGE-528T Gigabit Ethernet" },
+	{ PCI_VENDOR_DLINK, PCI_PRODUCT_DLINK_DGE530T_C1,
+	    RTK_8169,
+	    "D-Link DGE-530T C1 Gigabit Ethernet" },
 	{ PCI_VENDOR_USR2, PCI_PRODUCT_USR2_USR997902,
 	    RTK_8169,
 	    "US Robotics (3Com) USR997902 Gigabit Ethernet" },
@@ -240,6 +246,9 @@ re_pci_attach(device_t parent, device_t self, void *aux)
 	    t->rtk_basetype == RTK_8101E)
 		sc->sc_quirk |= RTKQ_PCIE;
 
+	if (t->rtk_basetype == RTK_8168)
+		sc->sc_quirk |= RTKQ_IM_HW;
+
 	if (pci_dma64_available(pa) && (sc->sc_quirk & RTKQ_PCIE))
 		sc->sc_dmat = pa->pa_dmat64;
 	else
@@ -259,8 +268,8 @@ re_pci_attach(device_t parent, device_t self, void *aux)
 	}
 	intrstr = pci_intr_string(pc, psc->sc_pihp[0], intrbuf,
 	    sizeof(intrbuf));
-	psc->sc_ih = pci_intr_establish(pc, psc->sc_pihp[0], IPL_NET,
-	    re_intr, sc);
+	psc->sc_ih = pci_intr_establish_xname(pc, psc->sc_pihp[0], IPL_NET,
+	    re_intr, sc, device_xname(sc->sc_dev));
 	if (psc->sc_ih == NULL) {
 		aprint_error_dev(self, "couldn't establish interrupt");
 		if (intrstr != NULL)

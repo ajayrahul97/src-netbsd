@@ -1,4 +1,4 @@
-/*	$NetBSD: ntfs_vfsops.c,v 1.104 2015/03/28 19:24:05 maxv Exp $	*/
+/*	$NetBSD: ntfs_vfsops.c,v 1.107.16.1 2019/10/21 20:15:02 martin Exp $	*/
 
 /*-
  * Copyright (c) 1998, 1999 Semen Ustimenko
@@ -29,7 +29,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ntfs_vfsops.c,v 1.104 2015/03/28 19:24:05 maxv Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ntfs_vfsops.c,v 1.107.16.1 2019/10/21 20:15:02 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -115,14 +115,14 @@ ntfs_mountroot(void)
 	args.mode = 0777;
 
 	if ((error = ntfs_mountfs(rootvp, mp, &args, l)) != 0) {
-		vfs_unbusy(mp, false, NULL);
-		vfs_destroy(mp);
+		vfs_unbusy(mp);
+		vfs_rele(mp);
 		return (error);
 	}
 
 	mountlist_append(mp);
 	(void)ntfs_statvfs(mp, &mp->mnt_stat);
-	vfs_unbusy(mp, false, NULL);
+	vfs_unbusy(mp);
 	return (0);
 }
 
@@ -322,6 +322,7 @@ ntfs_mountfs(struct vnode *devvp, struct mount *mp, struct ntfs_args *argsp, str
 	dev_t dev = devvp->v_rdev;
 	int error, i;
 	struct vnode *vp;
+	struct vnode_iterator *marker;
 
 	ntmp = NULL;
 
@@ -471,9 +472,13 @@ out1:
 		if (ntmp->ntm_sysvn[i])
 			vrele(ntmp->ntm_sysvn[i]);
 
-	if (vflush(mp, NULLVP, 0)) {
-		dprintf(("ntfs_mountfs: vflush failed\n"));
+	vfs_vnode_iterator_init(mp, &marker);
+	while ((vp = vfs_vnode_iterator_next(marker, NULL, NULL))) {
+		if (vrecycle(vp))
+			continue;
+		panic("%s: cannot recycle vnode %p", __func__, vp);
 	}
+	vfs_vnode_iterator_destroy(marker);
 out:
 	spec_node_setmountedfs(devvp, NULL);
 	if (bp)
@@ -883,7 +888,7 @@ struct vfsops ntfs_vfsops = {
 	.vfs_mountroot = ntfs_mountroot,
 	.vfs_snapshot = (void *)eopnotsupp,
 	.vfs_extattrctl = vfs_stdextattrctl,
-	.vfs_suspendctl = (void *)eopnotsupp,
+	.vfs_suspendctl = genfs_suspendctl,
 	.vfs_renamelock_enter = genfs_renamelock_enter,
 	.vfs_renamelock_exit = genfs_renamelock_exit,
 	.vfs_fsync = (void *)eopnotsupp,

@@ -1,4 +1,4 @@
-/*	$NetBSD: in6_var.h,v 1.3 2015/09/06 06:00:59 dholland Exp $	*/
+/*	$NetBSD: in6_var.h,v 1.4.6.1 2019/12/18 20:04:33 martin Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -15,13 +15,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *        This product includes software developed by the NetBSD
- *        Foundation, Inc. and its contributors.
- * 4. Neither the name of The NetBSD Foundation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE NETBSD FOUNDATION, INC. AND CONTRIBUTORS
  * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
@@ -60,7 +53,7 @@ struct in6_aliasreq50 {
 #define OSIOCAIFADDR_IN6	_IOW('i', 26, struct in6_aliasreq50)
 #define OSIOCSIFPHYADDR_IN6	_IOW('i', 70, struct in6_aliasreq50)
 
-static inline void in6_addrlifetime_to_in6_addrlifetime50(
+static __inline void in6_addrlifetime_to_in6_addrlifetime50(
     struct in6_addrlifetime *al)
 {
 	struct in6_addrlifetime cp;
@@ -73,7 +66,7 @@ static inline void in6_addrlifetime_to_in6_addrlifetime50(
 	oal->ia6t_pltime = cp.ia6t_pltime;
 }
 
-static inline void in6_aliasreq50_to_in6_aliasreq(
+static __inline void in6_aliasreq50_to_in6_aliasreq(
     struct in6_aliasreq *ar)
 {
 	struct in6_aliasreq50 *oar =

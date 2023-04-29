@@ -1,4 +1,4 @@
-/*	$NetBSD: if_kse.c,v 1.30 2016/06/10 13:27:14 ozaki-r Exp $	*/
+/*	$NetBSD: if_kse.c,v 1.38.2.1 2019/11/10 13:05:15 martin Exp $	*/
 
 /*-
  * Copyright (c) 2006 The NetBSD Foundation, Inc.
@@ -29,9 +29,12 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_kse.c,v 1.30 2016/06/10 13:27:14 ozaki-r Exp $");
+/*
+ * Micrel 8841/8842 10/100 ethernet driver
+ */
 
+#include <sys/cdefs.h>
+__KERNEL_RCSID(0, "$NetBSD: if_kse.c,v 1.38.2.1 2019/11/10 13:05:15 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -52,12 +55,13 @@ __KERNEL_RCSID(0, "$NetBSD: if_kse.c,v 1.30 2016/06/10 13:27:14 ozaki-r Exp $");
 #include <net/if_media.h>
 #include <net/if_dl.h>
 #include <net/if_ether.h>
-
 #include <net/bpf.h>
 
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcidevs.h>
+
+#define KSE_LINKDEBUG 0
 
 #define CSR_READ_4(sc, off) \
 	    bus_space_read_4(sc->sc_st, sc->sc_sh, off)
@@ -94,6 +98,17 @@ __KERNEL_RCSID(0, "$NetBSD: if_kse.c,v 1.30 2016/06/10 13:27:14 ozaki-r Exp $");
 #define P1SR	0x514	/* port 1 status */
 #define P2CR4	0x532	/* port 2 control 4 */
 #define P2SR	0x534	/* port 2 status */
+#define PxCR_STARTNEG	(1U << 9)	/* restart auto negotiation */
+#define PxCR_AUTOEN	(1U << 7)	/* auto negotiation enable */
+#define PxCR_SPD100	(1U << 6)	/* force speed 100 */
+#define PxCR_USEFDX	(1U << 5)	/* force full duplex */
+#define PxCR_USEFC	(1U << 4)	/* advertise pause flow control */
+#define PxSR_ACOMP	(1U << 6)	/* auto negotiation completed */
+#define PxSR_SPD100	(1U << 10)	/* speed is 100Mbps */
+#define PxSR_FDX	(1U << 9)	/* full duplex */
+#define PxSR_LINKUP	(1U << 5)	/* link is good */
+#define PxSR_RXFLOW	(1U << 12)	/* receive flow control active */
+#define PxSR_TXFLOW	(1U << 11)	/* transmit flow control active */
 
 #define TXC_BS_MSK	0x3f000000	/* burst size */
 #define TXC_BS_SFT	(24)		/* 1,2,4,8,16,32 or 0 for unlimited */
@@ -208,8 +223,8 @@ struct kse_softc {
 	void *sc_ih;			/* interrupt cookie */
 
 	struct ifmedia sc_media;	/* ifmedia information */
-	int sc_media_status;		/* PHY */
-	int sc_media_active;		/* PHY */
+	int sc_linkstatus;		/* last P1SR register value */
+
 	callout_t  sc_callout;		/* MII tick callout */
 	callout_t  sc_stat_ch;		/* statistics counter callout */
 
@@ -286,7 +301,7 @@ do {									\
 	__rxd->r2 = __rxs->rxs_dmamap->dm_segs[0].ds_addr;		\
 	__rxd->r1 = R1_RBS_MASK /* __m->m_ext.ext_size */;		\
 	__rxd->r0 = R0_OWN;						\
-	KSE_CDRXSYNC((sc), (x), BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE); \
+	KSE_CDRXSYNC((sc), (x), BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE); \
 } while (/*CONSTCOND*/0)
 
 u_int kse_burstsize = 8;	/* DMA burst length tuning knob */
@@ -314,11 +329,10 @@ static int kse_intr(void *);
 static void rxintr(struct kse_softc *);
 static void txreap(struct kse_softc *);
 static void lnkchg(struct kse_softc *);
-static int ifmedia_upd(struct ifnet *);
-static void ifmedia_sts(struct ifnet *, struct ifmediareq *);
+static int ksephy_change(struct ifnet *);
+static void ksephy_status(struct ifnet *, struct ifmediareq *);
+static void nopifm_status(struct ifnet *, struct ifmediareq *);
 static void phy_tick(void *);
-static int ifmedia2_upd(struct ifnet *);
-static void ifmedia2_sts(struct ifnet *, struct ifmediareq *);
 #ifdef KSE_EVENT_COUNTERS
 static void stat_tick(void *);
 static void zerostats(struct kse_softc *);
@@ -404,7 +418,7 @@ kse_attach(device_t parent, device_t self, void *aux)
 	enaddr[3] = i; enaddr[2] = i >> 8;
 	i = CSR_READ_2(sc, MARH);
 	enaddr[1] = i; enaddr[0] = i >> 8;
-	printf("%s: Ethernet address: %s\n",
+	printf("%s: Ethernet address %s\n",
 		device_xname(sc->sc_dev), ether_sprintf(enaddr));
 
 	/*
@@ -420,7 +434,8 @@ kse_attach(device_t parent, device_t self, void *aux)
 		return;
 	}
 	intrstr = pci_intr_string(pc, ih, intrbuf, sizeof(intrbuf));
-	sc->sc_ih = pci_intr_establish(pc, ih, IPL_NET, kse_intr, sc);
+	sc->sc_ih = pci_intr_establish_xname(pc, ih, IPL_NET, kse_intr, sc,
+	    device_xname(self));
 	if (sc->sc_ih == NULL) {
 		aprint_error_dev(sc->sc_dev, "unable to establish interrupt");
 		if (intrstr != NULL)
@@ -437,28 +452,32 @@ kse_attach(device_t parent, device_t self, void *aux)
 	error = bus_dmamem_alloc(sc->sc_dmat,
 	    sizeof(struct kse_control_data), PAGE_SIZE, 0, &seg, 1, &nseg, 0);
 	if (error != 0) {
-		aprint_error_dev(sc->sc_dev, "unable to allocate control data, error = %d\n", error);
+		aprint_error_dev(sc->sc_dev,
+		    "unable to allocate control data, error = %d\n", error);
 		goto fail_0;
 	}
 	error = bus_dmamem_map(sc->sc_dmat, &seg, nseg,
 	    sizeof(struct kse_control_data), (void **)&sc->sc_control_data,
 	    BUS_DMA_COHERENT);
 	if (error != 0) {
-		aprint_error_dev(sc->sc_dev, "unable to map control data, error = %d\n", error);
+		aprint_error_dev(sc->sc_dev,
+		    "unable to map control data, error = %d\n", error);
 		goto fail_1;
 	}
 	error = bus_dmamap_create(sc->sc_dmat,
 	    sizeof(struct kse_control_data), 1,
 	    sizeof(struct kse_control_data), 0, 0, &sc->sc_cddmamap);
 	if (error != 0) {
-		aprint_error_dev(sc->sc_dev, "unable to create control data DMA map, "
+		aprint_error_dev(sc->sc_dev,
+		    "unable to create control data DMA map, "
 		    "error = %d\n", error);
 		goto fail_2;
 	}
 	error = bus_dmamap_load(sc->sc_dmat, sc->sc_cddmamap,
 	    sc->sc_control_data, sizeof(struct kse_control_data), NULL, 0);
 	if (error != 0) {
-		aprint_error_dev(sc->sc_dev, "unable to load control data DMA map, error = %d\n",
+		aprint_error_dev(sc->sc_dev,
+		    "unable to load control data DMA map, error = %d\n",
 		    error);
 		goto fail_3;
 	}
@@ -466,16 +485,18 @@ kse_attach(device_t parent, device_t self, void *aux)
 		if ((error = bus_dmamap_create(sc->sc_dmat, MCLBYTES,
 		    KSE_NTXSEGS, MCLBYTES, 0, 0,
 		    &sc->sc_txsoft[i].txs_dmamap)) != 0) {
-			aprint_error_dev(sc->sc_dev, "unable to create tx DMA map %d, "
-			    "error = %d\n", i, error);
+			aprint_error_dev(sc->sc_dev,
+			    "unable to create tx DMA map %d, error = %d\n",
+			    i, error);
 			goto fail_4;
 		}
 	}
 	for (i = 0; i < KSE_NRXDESC; i++) {
 		if ((error = bus_dmamap_create(sc->sc_dmat, MCLBYTES,
 		    1, MCLBYTES, 0, 0, &sc->sc_rxsoft[i].rxs_dmamap)) != 0) {
-			aprint_error_dev(sc->sc_dev, "unable to create rx DMA map %d, "
-			    "error = %d\n", i, error);
+			aprint_error_dev(sc->sc_dev,
+			    "unable to create rx DMA map %d, error = %d\n",
+			    i, error);
 			goto fail_5;
 		}
 		sc->sc_rxsoft[i].rxs_mbuf = NULL;
@@ -484,20 +505,31 @@ kse_attach(device_t parent, device_t self, void *aux)
 	callout_init(&sc->sc_callout, 0);
 	callout_init(&sc->sc_stat_ch, 0);
 
+	/* Initialize ifmedia structures. */
 	ifm = &sc->sc_media;
+	sc->sc_ethercom.ec_ifmedia = ifm;
+	sc->sc_linkstatus = 0;
 	if (sc->sc_chip == 0x8841) {
-		ifmedia_init(ifm, 0, ifmedia_upd, ifmedia_sts);
-		ifmedia_add(ifm, IFM_ETHER|IFM_10_T, 0, NULL);
-		ifmedia_add(ifm, IFM_ETHER|IFM_10_T|IFM_FDX, 0, NULL);
-		ifmedia_add(ifm, IFM_ETHER|IFM_100_TX, 0, NULL);
-		ifmedia_add(ifm, IFM_ETHER|IFM_100_TX|IFM_FDX, 0, NULL);
-		ifmedia_add(ifm, IFM_ETHER|IFM_AUTO, 0, NULL);
-		ifmedia_set(ifm, IFM_ETHER|IFM_AUTO);
-	}
-	else {
-		ifmedia_init(ifm, 0, ifmedia2_upd, ifmedia2_sts);
-		ifmedia_add(ifm, IFM_ETHER|IFM_AUTO, 0, NULL);
-		ifmedia_set(ifm, IFM_ETHER|IFM_AUTO);
+		ifmedia_init(ifm, 0, ksephy_change, ksephy_status);
+		ifmedia_add(ifm, IFM_ETHER | IFM_10_T, 0, NULL);
+		ifmedia_add(ifm, IFM_ETHER | IFM_10_T | IFM_FDX, 0, NULL);
+		ifmedia_add(ifm, IFM_ETHER | IFM_100_TX, 0, NULL);
+		ifmedia_add(ifm, IFM_ETHER | IFM_100_TX | IFM_FDX, 0, NULL);
+		ifmedia_add(ifm, IFM_ETHER | IFM_AUTO, 0, NULL);
+		ifmedia_set(ifm, IFM_ETHER | IFM_AUTO);
+	} else {
+		/*
+		 * pretend 100FDX w/ no alternative media selection.
+		 * 8842 MAC is tied with a builtin 3 port switch.
+		 * It can do rate control over either of tx / rx direction
+		 * respectively, tough, this driver leaves the rate unlimited
+		 * intending 100Mbps maximum.
+		 * 2 ports behave in AN mode and this driver provides no mean
+		 * to see the exact details.
+		 */
+		ifmedia_init(ifm, 0, NULL, nopifm_status);
+		ifmedia_add(ifm, IFM_ETHER | IFM_100_TX | IFM_FDX, 0, NULL);
+		ifmedia_set(ifm, IFM_ETHER | IFM_100_TX | IFM_FDX);
 	}
 
 	printf("%s: 10baseT, 10baseT-FDX, 100baseTX, 100baseTX-FDX, auto\n",
@@ -515,7 +547,7 @@ kse_attach(device_t parent, device_t self, void *aux)
 	IFQ_SET_READY(&ifp->if_snd);
 
 	/*
-	 * KSZ8842 can handle 802.1Q VLAN-sized frames,
+	 * capable of 802.1Q VLAN-sized frames,
 	 * can do IPv4, TCPv4, and UDPv4 checksums in hardware.
 	 */
 	sc->sc_ethercom.ec_capabilities |= ETHERCAP_VLAN_MTU;
@@ -633,17 +665,11 @@ static int
 kse_ioctl(struct ifnet *ifp, u_long cmd, void *data)
 {
 	struct kse_softc *sc = ifp->if_softc;
-	struct ifreq *ifr = (struct ifreq *)data;
 	int s, error;
 
 	s = splnet();
 
 	switch (cmd) {
-	case SIOCSIFMEDIA:
-	case SIOCGIFMEDIA:
-		error = ifmedia_ioctl(ifp, ifr, &sc->sc_media, cmd);
-		break;
-
 	default:
 		if ((error = ether_ioctl(ifp, cmd, data)) != ENETRESET)
 			break;
@@ -765,7 +791,8 @@ kse_init(struct ifnet *ifp)
 	kse_set_filter(sc);
 
 	/* set current media */
-	(void)ifmedia_upd(ifp);
+	if (sc->sc_chip == 0x8841)
+		(void)ksephy_change(ifp);
 
 	/* enable transmitter and receiver */
 	CSR_WRITE_4(sc, MDTXC, sc->sc_txc);
@@ -773,7 +800,7 @@ kse_init(struct ifnet *ifp)
 	CSR_WRITE_4(sc, MDRSC, 1);
 
 	/* enable interrupts */
-	sc->sc_inten = INT_DMTS|INT_DMRS|INT_DMRBUS;
+	sc->sc_inten = INT_DMTS | INT_DMRS | INT_DMRBUS;
 	if (sc->sc_chip == 0x8841)
 		sc->sc_inten |= INT_DMLCS;
 	CSR_WRITE_4(sc, INTST, ~0);
@@ -882,12 +909,10 @@ kse_start(struct ifnet *ifp)
 	int error, nexttx, lasttx, ofree, seg;
 	uint32_t tdes0;
 
-	if ((ifp->if_flags & (IFF_RUNNING|IFF_OACTIVE)) != IFF_RUNNING)
+	if ((ifp->if_flags & (IFF_RUNNING | IFF_OACTIVE)) != IFF_RUNNING)
 		return;
 
-	/*
-	 * Remember the previous number of free descriptors.
-	 */
+	/* Remember the previous number of free descriptors. */
 	ofree = sc->sc_txfree;
 
 	/*
@@ -909,7 +934,7 @@ kse_start(struct ifnet *ifp)
 		dmamap = txs->txs_dmamap;
 
 		error = bus_dmamap_load_mbuf(sc->sc_dmat, dmamap, m0,
-		    BUS_DMA_WRITE|BUS_DMA_NOWAIT);
+		    BUS_DMA_WRITE | BUS_DMA_NOWAIT);
 		if (error) {
 			if (error == EFBIG) {
 				printf("%s: Tx packet consumes too many "
@@ -980,14 +1005,14 @@ kse_start(struct ifnet *ifp)
 			}
 		} while ((m = m->m_next) != NULL);
 
-		/* write last T0_OWN bit of the 1st segment */
+		/* Write last T0_OWN bit of the 1st segment */
 		sc->sc_txdescs[lasttx].t1 |= T1_LS;
 		sc->sc_txdescs[sc->sc_txnext].t1 |= T1_FS;
 		sc->sc_txdescs[sc->sc_txnext].t0 = T0_OWN;
 		KSE_CDTXSYNC(sc, sc->sc_txnext, dmamap->dm_nsegs,
-		    BUS_DMASYNC_PREREAD|BUS_DMASYNC_PREWRITE);
+		    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 
-		/* tell DMA start transmit */
+		/* Tell DMA start transmit */
 		CSR_WRITE_4(sc, MDTSC, 1);
 
 		txs->txs_mbuf = m0;
@@ -1002,7 +1027,7 @@ kse_start(struct ifnet *ifp)
 		/*
 		 * Pass the packet to any BPF listeners.
 		 */
-		bpf_mtap(ifp, m0);
+		bpf_mtap(ifp, m0, BPF_D_OUT);
 	}
 
 	if (sc->sc_txsfree == 0 || sc->sc_txfree == 0) {
@@ -1020,7 +1045,8 @@ kse_set_filter(struct kse_softc *sc)
 {
 	struct ether_multistep step;
 	struct ether_multi *enm;
-	struct ifnet *ifp = &sc->sc_ethercom.ec_if;
+	struct ethercom *ec = &sc->sc_ethercom;
+	struct ifnet *ifp = &ec->ec_if;
 	uint32_t h, hashes[2];
 
 	sc->sc_rxc &= ~(RXC_MHTE | RXC_RM);
@@ -1028,9 +1054,12 @@ kse_set_filter(struct kse_softc *sc)
 	if (ifp->if_flags & IFF_PROMISC)
 		return;
 
-	ETHER_FIRST_MULTI(step, &sc->sc_ethercom, enm);
-	if (enm == NULL)
+	ETHER_LOCK(ec);
+	ETHER_FIRST_MULTI(step, ec, enm);
+	if (enm == NULL) {
+		ETHER_UNLOCK(ec);
 		return;
+	}
 	hashes[0] = hashes[1] = 0;
 	do {
 		if (memcmp(enm->enm_addrlo, enm->enm_addrhi, ETHER_ADDR_LEN)) {
@@ -1042,12 +1071,14 @@ kse_set_filter(struct kse_softc *sc)
 			 * ranges is for IP multicast routing, for which the
 			 * range is big enough to require all bits set.)
 			 */
+			ETHER_UNLOCK(ec);
 			goto allmulti;
 		}
 		h = ether_crc32_le(enm->enm_addrlo, ETHER_ADDR_LEN) >> 26;
 		hashes[h >> 5] |= 1 << (h & 0x1f);
 		ETHER_NEXT_MULTI(step, enm);
 	} while (enm != NULL);
+	ETHER_UNLOCK(ec);
 	sc->sc_rxc |= RXC_MHTE;
 	CSR_WRITE_4(sc, MTR0, hashes[0]);
 	CSR_WRITE_4(sc, MTR1, hashes[1]);
@@ -1146,14 +1177,14 @@ rxintr(struct kse_softc *sc)
 		rxs = &sc->sc_rxsoft[i];
 
 		KSE_CDRXSYNC(sc, i,
-		    BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
+		    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 
 		rxstat = sc->sc_rxdescs[i].r0;
-	
+
 		if (rxstat & R0_OWN) /* desc is left empty */
 			break;
 
-		/* R0_FS|R0_LS must have been marked for this desc */
+		/* R0_FS | R0_LS must have been marked for this desc */
 
 		if (rxstat & R0_ES) {
 			ifp->if_ierrors++;
@@ -1175,7 +1206,7 @@ rxintr(struct kse_softc *sc)
 		    rxs->rxs_dmamap->dm_mapsize, BUS_DMASYNC_POSTREAD);
 
 		len = rxstat & R0_FL_MASK;
-		len -= ETHER_CRC_LEN;	/* trim CRC off */
+		len -= ETHER_CRC_LEN;	/* Trim CRC off */
 		m = rxs->rxs_mbuf;
 
 		if (add_rxbuf(sc, i) != 0) {
@@ -1188,7 +1219,6 @@ rxintr(struct kse_softc *sc)
 			continue;
 		}
 
-		ifp->if_ipackets++;
 		m_set_rcvif(m, ifp);
 		m->m_pkthdr.len = m->m_len = len;
 
@@ -1199,7 +1229,6 @@ rxintr(struct kse_softc *sc)
 			if (rxstat & (R0_TCPE | R0_UDPE))
 				m->m_pkthdr.csum_flags |= M_CSUM_TCP_UDP_BAD;
 		}
-		bpf_mtap(ifp, m);
 		if_percpuq_enqueue(ifp->if_percpuq, m);
 #ifdef KSEDIAGNOSTIC
 		if (kse_monitor_rxintr > 0) {
@@ -1226,14 +1255,14 @@ txreap(struct kse_softc *sc)
 		txs = &sc->sc_txsoft[i];
 
 		KSE_CDTXSYNC(sc, txs->txs_firstdesc, txs->txs_ndesc,
-		    BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
+		    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 
 		txstat = sc->sc_txdescs[txs->txs_lastdesc].t0;
 
 		if (txstat & T0_OWN) /* desc is still in use */
 			break;
 
-		/* there is no way to tell transmission status per frame */
+		/* There is no way to tell transmission status per frame */
 
 		ifp->if_opackets++;
 
@@ -1254,92 +1283,92 @@ lnkchg(struct kse_softc *sc)
 {
 	struct ifmediareq ifmr;
 
-#if 0 /* rambling link status */
-	printf("%s: link %s\n", device_xname(sc->sc_dev),
-	    (CSR_READ_2(sc, P1SR) & (1U << 5)) ? "up" : "down");
+#if KSE_LINKDEBUG > 0
+printf("link change detected\n");
 #endif
-	ifmedia_sts(&sc->sc_ethercom.ec_if, &ifmr);
+	ksephy_status(&sc->sc_ethercom.ec_if, &ifmr);
 }
 
 static int
-ifmedia_upd(struct ifnet *ifp)
+ksephy_change(struct ifnet *ifp)
 {
 	struct kse_softc *sc = ifp->if_softc;
 	struct ifmedia *ifm = &sc->sc_media;
-	uint16_t ctl;
-
-	ctl = 0;
-	if (IFM_SUBTYPE(ifm->ifm_media) == IFM_AUTO) {
-		ctl |= (1U << 13); /* restart AN */
-		ctl |= (1U << 7);  /* enable AN */
-		ctl |= (1U << 4);  /* advertise flow control pause */
-		ctl |= (1U << 3) | (1U << 2) | (1U << 1) | (1U << 0);
-	}
-	else {
-		if (IFM_SUBTYPE(ifm->ifm_media) == IFM_100_TX)
-			ctl |= (1U << 6);
+	uint16_t p1cr4;
+#if KSE_LINKDEBUG > 0
+printf("ifm_media: %x\n", ifm->ifm_cur->ifm_media);
+#endif
+	p1cr4 = 0;
+	if (IFM_SUBTYPE(ifm->ifm_cur->ifm_media) == IFM_AUTO) {
+		p1cr4 |= PxCR_STARTNEG;	/* restart AN */
+		p1cr4 |= PxCR_AUTOEN;	/* enable AN */
+		p1cr4 |= PxCR_USEFC;	/* advertise flow control pause */
+		p1cr4 |= 0xf;		/* advertise 100-FDX,100-HDX,10-FDX,10-HDX */
+	} else {
+		if (IFM_SUBTYPE(ifm->ifm_cur->ifm_media) == IFM_100_TX)
+			p1cr4 |= PxCR_SPD100;
 		if (ifm->ifm_media & IFM_FDX)
-			ctl |= (1U << 5);
+			p1cr4 |= PxCR_USEFDX;
 	}
-	CSR_WRITE_2(sc, P1CR4, ctl);
-
-	sc->sc_media_active = IFM_NONE;
-	sc->sc_media_status = IFM_AVALID;
-
+	CSR_WRITE_2(sc, P1CR4, p1cr4);
+#if KSE_LINKDEBUG > 0
+printf("P1CR4: %04x\n", p1cr4);
+#endif
 	return 0;
 }
 
 static void
-ifmedia_sts(struct ifnet *ifp, struct ifmediareq *ifmr)
+ksephy_status(struct ifnet *ifp, struct ifmediareq *ifmr)
+{
+	struct kse_softc *sc = ifp->if_softc;
+	int media_status;
+	u_int media_active;
+	uint16_t p1cr4, p1sr;
+
+	media_status = IFM_AVALID;
+	media_active = IFM_ETHER;
+
+	p1cr4 = CSR_READ_2(sc, P1CR4);
+	p1sr = CSR_READ_2(sc, P1SR);
+#if KSE_LINKDEBUG > 0
+printf("P1SR: %04x link %s\n", p1sr, (p1sr & PxSR_LINKUP) ? "up" : "down");
+#endif
+	sc->sc_linkstatus = p1sr;
+	if (p1sr & PxSR_LINKUP)
+		media_status |= IFM_ACTIVE;
+
+	if (p1cr4 & PxCR_AUTOEN) {
+		if ((p1sr & PxSR_ACOMP) == 0) {
+			media_active |= IFM_NONE;
+			goto out; /* Negotiation in progress */
+		}
+	}
+
+	media_active |= (p1sr & PxSR_SPD100) ? IFM_100_TX : IFM_10_T;
+	if (p1sr & PxSR_FDX)
+		media_active |= IFM_FDX;
+	if (p1sr & PxSR_RXFLOW)
+		media_active |= IFM_FLOW | IFM_ETH_RXPAUSE;
+	if (p1sr & PxSR_TXFLOW)
+		media_active |= IFM_FLOW | IFM_ETH_TXPAUSE;
+  out:
+	ifmr->ifm_active = media_active;
+	ifmr->ifm_status = media_status;
+}
+
+static void
+nopifm_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 {
 	struct kse_softc *sc = ifp->if_softc;
 	struct ifmedia *ifm = &sc->sc_media;
-	uint16_t ctl, sts, result;
 
-	ifmr->ifm_status = IFM_AVALID;
-	ifmr->ifm_active = IFM_ETHER;
+#if KSE_LINKDEBUG > 1
+printf("p1sr: %04x, p2sr: %04x\n", CSR_READ_2(sc, P1SR), CSR_READ_2(sc, P2SR));
+#endif
 
-	ctl = CSR_READ_2(sc, P1CR4);
-	sts = CSR_READ_2(sc, P1SR);
-	if ((sts & (1U << 5)) == 0) {
-		ifmr->ifm_active |= IFM_NONE;
-		goto out; /* link is down */
-	}
-	ifmr->ifm_status |= IFM_ACTIVE;
-	if (IFM_SUBTYPE(ifm->ifm_media) == IFM_AUTO) {
-		if ((sts & (1U << 6)) == 0) {
-			ifmr->ifm_active |= IFM_NONE;
-			goto out; /* negotiation in progress */
-		}
-		result = ctl & sts & 017;
-		if (result & (1U << 3))
-			ifmr->ifm_active |= IFM_100_TX|IFM_FDX;
-		else if (result & (1U << 2))
-			ifmr->ifm_active |= IFM_100_TX|IFM_HDX;
-		else if (result & (1U << 1))
-			ifmr->ifm_active |= IFM_10_T|IFM_FDX;
-		else if (result & (1U << 0))
-			ifmr->ifm_active |= IFM_10_T|IFM_HDX;
-		else
-			ifmr->ifm_active |= IFM_NONE;
-		if (ctl & (1U << 4))
-			ifmr->ifm_active |= IFM_FLOW | IFM_ETH_RXPAUSE;
-		if (sts & (1U << 4))
-			ifmr->ifm_active |= IFM_FLOW | IFM_ETH_TXPAUSE;
-	}
-	else {
-		ifmr->ifm_active |= (sts & (1U << 10)) ? IFM_100_TX : IFM_10_T;
-		if (sts & (1U << 9))
-			ifmr->ifm_active |= IFM_FDX;
-		if (sts & (1U << 12))
-			ifmr->ifm_active |= IFM_FLOW | IFM_ETH_RXPAUSE;
-		if (sts & (1U << 11))
-			ifmr->ifm_active |= IFM_FLOW | IFM_ETH_TXPAUSE;
-	}
-
-  out:
-	sc->sc_media_status = ifmr->ifm_status;
-	sc->sc_media_active = ifmr->ifm_active;
+	/* 8842 MAC pretends 100FDX all the time */
+	ifmr->ifm_active = ifm->ifm_cur->ifm_media;
+	ifmr->ifm_status = IFM_AVALID | IFM_ACTIVE;
 }
 
 static void
@@ -1348,43 +1377,15 @@ phy_tick(void *arg)
 	struct kse_softc *sc = arg;
 	struct ifmediareq ifmr;
 	int s;
+	uint16_t p1sr;
 
 	s = splnet();
-	ifmedia_sts(&sc->sc_ethercom.ec_if, &ifmr);
+	p1sr = CSR_READ_2(sc, P1SR);
+	if (sc->sc_linkstatus != p1sr)
+		ksephy_status(&sc->sc_ethercom.ec_if, &ifmr);
 	splx(s);
 
 	callout_reset(&sc->sc_callout, hz, phy_tick, sc);
-}
-
-static int
-ifmedia2_upd(struct ifnet *ifp)
-{
-	struct kse_softc *sc = ifp->if_softc;
-
-	sc->sc_media_status = IFM_AVALID;
-	sc->sc_media_active = IFM_NONE;
-	return 0;
-}
-
-static void
-ifmedia2_sts(struct ifnet *ifp, struct ifmediareq *ifmr)
-{
-	struct kse_softc *sc = ifp->if_softc;
-	int p1sts, p2sts;
-
-	ifmr->ifm_status = IFM_AVALID;
-	ifmr->ifm_active = IFM_ETHER;
-	p1sts = CSR_READ_2(sc, P1SR);
-	p2sts = CSR_READ_2(sc, P2SR);
-	if (((p1sts | p2sts) & (1U << 5)) == 0)
-		ifmr->ifm_active |= IFM_NONE;
-	else {
-		ifmr->ifm_status |= IFM_ACTIVE;
-		ifmr->ifm_active |= IFM_100_TX|IFM_FDX;
-		ifmr->ifm_active |= IFM_FLOW|IFM_ETH_RXPAUSE|IFM_ETH_TXPAUSE;
-	}
-	sc->sc_media_status = ifmr->ifm_status;
-	sc->sc_media_active = ifmr->ifm_active;
 }
 
 #ifdef KSE_EVENT_COUNTERS
@@ -1427,7 +1428,7 @@ zerostats(struct kse_softc *sc)
 	struct ksext *ee = &sc->sc_ext;
 	int nport, p, i, val;
 
-	/* make sure all the HW counters get zero */
+	/* Make sure all the HW counters get zero */
 	nport = (sc->sc_chip == 0x8842) ? 3 : 1;
 	for (p = 0; p < nport; p++) {
 		for (i = 0; i < 31; i++) {

@@ -1,4 +1,4 @@
-/*	$NetBSD: sysmon_power.c,v 1.57 2015/12/14 01:08:47 pgoyette Exp $	*/
+/*	$NetBSD: sysmon_power.c,v 1.60.4.1 2019/09/01 10:57:53 martin Exp $	*/
 
 /*-
  * Copyright (c) 2007 Juan Romero Pardines.
@@ -69,7 +69,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: sysmon_power.c,v 1.57 2015/12/14 01:08:47 pgoyette Exp $");
+__KERNEL_RCSID(0, "$NetBSD: sysmon_power.c,v 1.60.4.1 2019/09/01 10:57:53 martin Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_compat_netbsd.h"
@@ -89,6 +89,7 @@ __KERNEL_RCSID(0, "$NetBSD: sysmon_power.c,v 1.57 2015/12/14 01:08:47 pgoyette E
 #include <sys/rndsource.h>
 #include <sys/module.h>
 #include <sys/once.h>
+#include <sys/compat_stub.h>
 
 #include <dev/sysmon/sysmonvar.h>
 #include <prop/proplib.h>
@@ -330,6 +331,8 @@ sysmon_power_daemon_task(struct power_event_dictionary *ped,
 	if (!ped || !ped->dict || !pev_data)
 		return EINVAL;
 
+	memset(&pev, 0, sizeof(pev));
+
 	mutex_enter(&sysmon_power_event_queue_mtx);
 	
 	switch (event) {
@@ -344,16 +347,10 @@ sysmon_power_daemon_task(struct power_event_dictionary *ped,
 		    (struct sysmon_pswitch *)pev_data;
 
 		pev.pev_type = POWER_EVENT_SWITCH_STATE_CHANGE;
-#ifdef COMPAT_40
-		pev.pev_switch.psws_state = event;
-		pev.pev_switch.psws_type = pswitch->smpsw_type;
 
-		if (pswitch->smpsw_name) {
-			(void)strlcpy(pev.pev_switch.psws_name,
-			          pswitch->smpsw_name,
-			          sizeof(pev.pev_switch.psws_name));
-		}
-#endif
+		MODULE_HOOK_CALL_VOID(compat_sysmon_power_40_hook,
+		    (&pev, pswitch, event), __nothing);
+
 		error = sysmon_power_make_dictionary(ped->dict,
 						     pswitch,
 						     event,
@@ -557,11 +554,19 @@ filt_sysmon_power_read(struct knote *kn, long hint)
 	return kn->kn_data > 0;
 }
 
-static const struct filterops sysmon_power_read_filtops =
-    { 1, NULL, filt_sysmon_power_rdetach, filt_sysmon_power_read };
+static const struct filterops sysmon_power_read_filtops = {
+    .f_isfd = 1,
+    .f_attach = NULL,
+    .f_detach = filt_sysmon_power_rdetach,
+    .f_event = filt_sysmon_power_read,
+};
 
-static const struct filterops sysmon_power_write_filtops =
-    { 1, NULL, filt_sysmon_power_rdetach, filt_seltrue };
+static const struct filterops sysmon_power_write_filtops = {
+    .f_isfd = 1,
+    .f_attach = NULL,
+    .f_detach = filt_sysmon_power_rdetach,
+    .f_event = filt_seltrue,
+};
 
 /*
  * sysmonkqfilter_power:

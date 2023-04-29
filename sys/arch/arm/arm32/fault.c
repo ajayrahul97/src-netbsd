@@ -1,4 +1,4 @@
-/*	$NetBSD: fault.c,v 1.103 2015/03/02 13:36:36 martin Exp $	*/
+/*	$NetBSD: fault.c,v 1.108.4.1 2019/12/08 14:31:57 martin Exp $	*/
 
 /*
  * Copyright 2003 Wasabi Systems, Inc.
@@ -81,7 +81,7 @@
 #include "opt_kgdb.h"
 
 #include <sys/types.h>
-__KERNEL_RCSID(0, "$NetBSD: fault.c,v 1.103 2015/03/02 13:36:36 martin Exp $");
+__KERNEL_RCSID(0, "$NetBSD: fault.c,v 1.108.4.1 2019/12/08 14:31:57 martin Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -113,14 +113,11 @@ __KERNEL_RCSID(0, "$NetBSD: fault.c,v 1.103 2015/03/02 13:36:36 martin Exp $");
 #include <arch/arm/arm/disassem.h>
 #include <arm/arm32/machdep.h>
 
-extern char fusubailout[];
-
 #ifdef DEBUG
 int last_fault_code;	/* For the benefit of pmap_fault_fixup() */
 #endif
 
-#if defined(CPU_ARM3) || defined(CPU_ARM6) || \
-    defined(CPU_ARM7) || defined(CPU_ARM7TDMI)
+#if defined(CPU_ARM6) || defined(CPU_ARM7) || defined(CPU_ARM7TDMI)
 /* These CPUs may need data/prefetch abort fixups */
 #define	CPU_ABORT_FIXUP_REQUIRED
 #endif
@@ -262,10 +259,10 @@ data_abort_handler(trapframe_t *tf)
 
 	/* Get the current lwp structure */
 
-	UVMHIST_LOG(maphist, " (l=%#x, far=%#x, fsr=%#x",
-	    l, far, fsr, 0);
-	UVMHIST_LOG(maphist, "  tf=%#x, pc=%#x)",
-	    tf, tf->tf_pc, 0, 0);
+	UVMHIST_LOG(maphist, " (l=%#jx, far=%#jx, fsr=%#jx",
+	    (uintptr_t)l, far, fsr, 0);
+	UVMHIST_LOG(maphist, "  tf=%#jx, pc=%#jx)",
+	    (uintptr_t)tf, (uintptr_t)tf->tf_pc, 0, 0);
 
 	/* Data abort came from user mode? */
 	bool user = (TRAP_USERMODE(tf) != 0);
@@ -303,16 +300,8 @@ data_abort_handler(trapframe_t *tf)
 	 * the MMU.
 	 */
 
-	/* fusubailout is used by [fs]uswintr to avoid page faulting */
-	if (__predict_false(pcb->pcb_onfault == fusubailout)) {
-		tf->tf_r0 = EFAULT;
-		tf->tf_pc = (intptr_t) pcb->pcb_onfault;
-		return;
-	}
-
-	if (user) {
-		lwp_settrapframe(l, tf);
-	}
+	KASSERTMSG(!user || tf == lwp_trapframe(l), "tf %p vs %p", tf,
+	    lwp_trapframe(l));
 
 	/*
 	 * Make sure the Program Counter is sane. We could fall foul of
@@ -384,7 +373,7 @@ data_abort_handler(trapframe_t *tf)
 	     (read_insn(tf->tf_pc, false) & 0x05200000) != 0x04200000))) {
 		map = kernel_map;
 
-		/* Was the fault due to the FPE/IPKDB ? */
+		/* Was the fault due to the FPE ? */
 		if (__predict_false((tf->tf_spsr & PSR_MODE)==PSR_UND32_MODE)) {
 			KSI_INIT_TRAP(&ksi);
 			ksi.ksi_signo = SIGSEGV;
@@ -487,8 +476,6 @@ data_abort_handler(trapframe_t *tf)
 	if (__predict_true(error == 0)) {
 		if (user)
 			uvm_grow(l->l_proc, va); /* Record any stack growth */
-		else
-			ucas_ras_check(tf);
 		UVMHIST_LOG(maphist, " <- uvm", 0, 0, 0, 0);
 		goto out;
 	}
@@ -529,7 +516,7 @@ data_abort_handler(trapframe_t *tf)
 	}
 	ksi.ksi_addr = (uint32_t *)(intptr_t) far;
 	ksi.ksi_trap = fsr;
-	UVMHIST_LOG(maphist, " <- error (%d)", error, 0, 0, 0);
+	UVMHIST_LOG(maphist, " <- error (%jd)", error, 0, 0, 0);
 
 do_trapsignal:
 	call_trapsignal(l, tf, &ksi);
@@ -624,7 +611,7 @@ dab_align(trapframe_t *tf, u_int fsr, u_int far, struct lwp *l, ksiginfo_t *ksi)
 	ksi->ksi_addr = (uint32_t *)(intptr_t)far;
 	ksi->ksi_trap = fsr;
 
-	lwp_settrapframe(l, tf);
+	KASSERTMSG(tf == lwp_trapframe(l), "tf %p vs %p", tf, lwp_trapframe(l));
 
 	return (1);
 }
@@ -731,7 +718,7 @@ dab_buserr(trapframe_t *tf, u_int fsr, u_int far, struct lwp *l,
 	ksi->ksi_addr = (uint32_t *)(intptr_t)far;
 	ksi->ksi_trap = fsr;
 
-	lwp_settrapframe(l, tf);
+	KASSERTMSG(tf == lwp_trapframe(l), "tf %p vs %p", tf, lwp_trapframe(l));
 
 	return (1);
 }
@@ -834,7 +821,8 @@ prefetch_abort_handler(trapframe_t *tf)
 		ksi.ksi_signo = SIGILL;
 		ksi.ksi_code = ILL_ILLOPC;
 		ksi.ksi_addr = (uint32_t *)(intptr_t) tf->tf_pc;
-		lwp_settrapframe(l, tf);
+		KASSERTMSG(tf == lwp_trapframe(l), "tf %p vs %p", tf,
+		    lwp_trapframe(l));
 		goto do_trapsignal;
 	default:
 		break;
@@ -846,10 +834,13 @@ prefetch_abort_handler(trapframe_t *tf)
 
 	/* Get fault address */
 	fault_pc = tf->tf_pc;
-	lwp_settrapframe(l, tf);
-	UVMHIST_LOG(maphist, " (pc=0x%x, l=0x%x, tf=0x%x)",
-	    fault_pc, l, tf, 0);
+	KASSERTMSG(tf == lwp_trapframe(l), "tf %p vs %p", tf, lwp_trapframe(l));
+	UVMHIST_LOG(maphist, " (pc=0x%jx, l=0x%#jx, tf=0x%#jx)",
+	    fault_pc, (uintptr_t)l, (uintptr_t)tf, 0);
 
+#ifdef THUMB_CODE
+ recheck:
+#endif
 	/* Ok validate the address, can only execute in USER space */
 	if (__predict_false(fault_pc >= VM_MAXUSER_ADDRESS ||
 	    (fault_pc < VM_MIN_ADDRESS && vector_page == ARM_VECTORS_LOW))) {
@@ -891,7 +882,7 @@ prefetch_abort_handler(trapframe_t *tf)
 	}
 	KSI_INIT_TRAP(&ksi);
 
-	UVMHIST_LOG (maphist, " <- fatal (%d)", error, 0, 0, 0);
+	UVMHIST_LOG (maphist, " <- fatal (%jd)", error, 0, 0, 0);
 
 	if (error == ENOMEM) {
 		printf("UVM: pid %d (%s), uid %d killed: "
@@ -909,6 +900,18 @@ do_trapsignal:
 	call_trapsignal(l, tf, &ksi);
 
 out:
+
+#ifdef THUMB_CODE
+#define THUMB_32BIT(hi) (((hi) & 0xe000) == 0xe000 && ((hi) & 0x1800))
+	/* thumb-32 instruction was located on page boundary? */
+	if ((tf->tf_spsr & PSR_T_bit) &&
+	    ((fault_pc & PAGE_MASK) == (PAGE_SIZE - THUMB_INSN_SIZE)) &&
+	    THUMB_32BIT(*(uint16_t *)tf->tf_pc)) {
+		fault_pc = tf->tf_pc + THUMB_INSN_SIZE;
+		goto recheck;
+	}
+#endif /* THUMB_CODE */
+
 	KASSERT(!TRAP_USERMODE(tf) || VALID_R15_PSR(tf->tf_pc, tf->tf_spsr));
 	userret(l);
 }

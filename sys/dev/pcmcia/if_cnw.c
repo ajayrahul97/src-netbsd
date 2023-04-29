@@ -1,4 +1,4 @@
-/*	$NetBSD: if_cnw.c,v 1.58 2016/06/10 13:27:15 ozaki-r Exp $	*/
+/*	$NetBSD: if_cnw.c,v 1.65.4.1 2019/10/23 19:43:24 martin Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2004 The NetBSD Foundation, Inc.
@@ -105,7 +105,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_cnw.c,v 1.58 2016/06/10 13:27:15 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_cnw.c,v 1.65.4.1 2019/10/23 19:43:24 martin Exp $");
 
 #include "opt_inet.h"
 
@@ -129,6 +129,7 @@ __KERNEL_RCSID(0, "$NetBSD: if_cnw.c,v 1.58 2016/06/10 13:27:15 ozaki-r Exp $");
 
 #include <net/if_dl.h>
 #include <net/if_ether.h>
+#include <net/bpf.h>
 
 #ifdef INET
 #include <netinet/in.h>
@@ -137,9 +138,6 @@ __KERNEL_RCSID(0, "$NetBSD: if_cnw.c,v 1.58 2016/06/10 13:27:15 ozaki-r Exp $");
 #include <netinet/ip.h>
 #include <netinet/if_inarp.h>
 #endif
-
-#include <net/bpf.h>
-#include <net/bpfdesc.h>
 
 /*
  * Let these be patchable variables, initialized from macros that can
@@ -552,12 +550,12 @@ cnw_attach(device_t parent, device_t self, void *aux)
 	ifp->if_start = cnw_start;
 	ifp->if_ioctl = cnw_ioctl;
 	ifp->if_watchdog = cnw_watchdog;
-	ifp->if_flags = IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX |
-	    IFF_NOTRAILERS;
+	ifp->if_flags = IFF_BROADCAST | IFF_MULTICAST | IFF_SIMPLEX;
 	IFQ_SET_READY(&ifp->if_snd);
 
 	/* Attach the interface */
 	if_attach(ifp);
+	if_deferred_start_init(ifp, NULL);
 	ether_ifattach(ifp, macaddr);
 
 	sc->sc_resource |= CNW_RES_NET;
@@ -668,7 +666,7 @@ cnw_start(struct ifnet *ifp)
 		if (m0 == 0)
 			break;
 
-		bpf_mtap(ifp, m0);
+		bpf_mtap(ifp, m0, BPF_D_OUT);
 
 		cnw_transmit(sc, m0);
 		++ifp->if_opackets;
@@ -728,8 +726,7 @@ cnw_transmit(struct cnw_softc *sc, struct mbuf *m0)
 			mptr += n;
 			mbytes -= n;
 		}
-		MFREE(m, m0);
-		m = m0;
+		m = m0 = m_free(m);
 	}
 
 	/* Issue transmit command */
@@ -791,7 +788,7 @@ cnw_read(struct cnw_softc *sc)
 			mbytes -= pad;
 		}
 		mptr = mtod(m, u_int8_t *);
-		mbytes = m->m_len = min(totbytes, mbytes);
+		mbytes = m->m_len = uimin(totbytes, mbytes);
 		totbytes -= mbytes;
 		while (mbytes > 0) {
 			if (bufbytes == 0) {
@@ -851,9 +848,6 @@ cnw_recv(struct cnw_softc *sc)
 			++ifp->if_ierrors;
 			return;
 		}
-		++ifp->if_ipackets;
-
-		bpf_mtap(ifp, m);
 
 		/* Pass the packet up. */
 		if_percpuq_enqueue(ifp->if_percpuq, m);
@@ -976,7 +970,7 @@ cnw_intr(void *arg)
 			ifp->if_flags &= ~IFF_OACTIVE;
 
 			/* Continue to send packets from the queue */
-			cnw_start(&sc->sc_ethercom.ec_if);
+			if_schedule_deferred_start(&sc->sc_ethercom.ec_if);
 		}
 
 	}

@@ -1,4 +1,4 @@
-/*	$NetBSD: sys_aio.c,v 1.41 2016/07/07 06:55:43 msaitoh Exp $	*/
+/*	$NetBSD: sys_aio.c,v 1.44 2019/02/10 17:13:33 christos Exp $	*/
 
 /*
  * Copyright (c) 2007 Mindaugas Rasiukevicius <rmind at NetBSD org>
@@ -32,7 +32,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: sys_aio.c,v 1.41 2016/07/07 06:55:43 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: sys_aio.c,v 1.44 2019/02/10 17:13:33 christos Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_ddb.h"
@@ -192,8 +192,6 @@ aio_procinit(struct proc *p)
 
 	/* Allocate and initialize AIO structure */
 	aio = kmem_zalloc(sizeof(struct aioproc), KM_SLEEP);
-	if (aio == NULL)
-		return EAGAIN;
 
 	/* Initialize queue and their synchronization structures */
 	mutex_init(&aio->aio_mtx, MUTEX_DEFAULT, IPL_NONE);
@@ -211,7 +209,7 @@ aio_procinit(struct proc *p)
 		return EAGAIN;
 	}
 	error = lwp_create(curlwp, p, uaddr, 0, NULL, 0, aio_worker,
-	    NULL, &l, curlwp->l_class);
+	    NULL, &l, curlwp->l_class, &curlwp->l_sigmask, &curlwp->l_sigstk);
 	if (error != 0) {
 		uvm_uarea_free(uaddr);
 		aio_exit(p, aio);
@@ -566,8 +564,7 @@ aio_enqueue_job(int op, void *aiocb_uptr, struct lio_req *lio)
 		return error;
 
 	/* Allocate and initialize a new AIO job */
-	a_job = pool_get(&aio_job_pool, PR_WAITOK);
-	memset(a_job, 0, sizeof(struct aio_job));
+	a_job = pool_get(&aio_job_pool, PR_WAITOK | PR_ZERO);
 
 	/*
 	 * Set the data.

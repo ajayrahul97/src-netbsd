@@ -1,4 +1,4 @@
-/*	$NetBSD: tty.c,v 1.271 2016/07/07 06:55:43 msaitoh Exp $	*/
+/*	$NetBSD: tty.c,v 1.281 2019/03/01 11:06:57 pgoyette Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -63,7 +63,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: tty.c,v 1.271 2016/07/07 06:55:43 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: tty.c,v 1.281 2019/03/01 11:06:57 pgoyette Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_compat_netbsd.h"
@@ -98,6 +98,7 @@ __KERNEL_RCSID(0, "$NetBSD: tty.c,v 1.271 2016/07/07 06:55:43 msaitoh Exp $");
 #include <sys/ioctl_compat.h>
 #include <sys/module.h>
 #include <sys/bitops.h>
+#include <sys/compat_stub.h>
 
 #ifdef COMPAT_60
 #include <compat/sys/ttycom.h>
@@ -208,8 +209,8 @@ static void *tty_sigsih;
 struct ttylist_head ttylist = TAILQ_HEAD_INITIALIZER(ttylist);
 int tty_count;
 kmutex_t tty_lock;
-krwlock_t ttcompat_lock;
-int (*ttcompatvec)(struct tty *, u_long, void *, int, struct lwp *);
+
+struct ptm_pty *ptm = NULL;
 
 uint64_t tk_cancc;
 uint64_t tk_nin;
@@ -302,8 +303,8 @@ sysctl_kern_tty_setup(void)
 	sysctl_createv(&kern_tkstat_sysctllog, 0, NULL, NULL,
 		       CTLFLAG_PERMANENT,
 		       CTLTYPE_NODE, "tkstat",
-		       SYSCTL_DESCR("Number of characters sent and and "
-				    "received on ttys"),
+		       SYSCTL_DESCR("Number of characters sent and received "
+				    "on ttys"),
 		       NULL, 0, NULL, 0,
 		       CTL_KERN, KERN_TKSTAT, CTL_EOL);
 
@@ -774,7 +775,7 @@ ttyinput_wlock(int c, struct tty *tp)
 			/*
 			 * Place the cursor over the '^' of the ^D.
 			 */
-			i = min(2, tp->t_column - i);
+			i = uimin(2, tp->t_column - i);
 			while (i > 0) {
 				(void)ttyoutput('\b', tp);
 				i--;
@@ -1240,12 +1241,14 @@ ttioctl(struct tty *tp, u_long cmd, void *data, int flag, struct lwp *l)
 		mutex_spin_exit(&tty_lock);
 		break;
 	case TIOCSTI:			/* simulate terminal input */
-		if (kauth_authorize_device_tty(l->l_cred, KAUTH_DEVICE_TTY_STI,
-		    tp) != 0) {
+		if ((error = kauth_authorize_device_tty(l->l_cred,
+		    KAUTH_DEVICE_TTY_STI, tp)) != 0) {
 			if (!ISSET(flag, FREAD))
-				return (EPERM);
+				return EPERM;
 			if (!isctty(p, tp))
-				return (EACCES);
+				return EACCES;
+			if (tp->t_session->s_leader->p_cred != p->p_cred)
+				return error;
 		}
 		(*tp->t_linesw->l_rint)(*(u_char *)data, tp);
 		break;
@@ -1406,25 +1409,18 @@ ttioctl(struct tty *tp, u_long cmd, void *data, int flag, struct lwp *l)
 		default:
 			break;
 		}
-#ifdef COMPAT_60
-		error = compat_60_ttioctl(tp, cmd, data, flag, l);
+
+		/* We may have to load the compat_60 module for this. */
+		(void)module_autoload("compat_60", MODULE_CLASS_EXEC);
+		MODULE_HOOK_CALL(tty_ttioctl_60_hook,
+		    (tp, cmd, data, flag, l), enosys(), error);
 		if (error != EPASSTHROUGH)
 			return error;
-#endif /* COMPAT_60 */
-		/* We may have to load the compat module for this. */
-		for (;;) {
-			rw_enter(&ttcompat_lock, RW_READER);
-			if (ttcompatvec != NULL) {
-				break;
-			}
-			rw_exit(&ttcompat_lock);
-			(void)module_autoload("compat", MODULE_CLASS_ANY);
-			if (ttcompatvec == NULL) {
-				return EPASSTHROUGH;
-			}
-		}
-		error = (*ttcompatvec)(tp, cmd, data, flag, l);
-		rw_exit(&ttcompat_lock);
+
+		/* We may have to load the compat_43 module for this. */
+		(void)module_autoload("compat_43", MODULE_CLASS_EXEC);
+		MODULE_HOOK_CALL(tty_ttioctl_43_hook,
+		    (tp, cmd, data, flag, l), enosys(), error);
 		return error;
 	}
 	return (0);
@@ -1514,10 +1510,19 @@ filt_ttywrite(struct knote *kn, long hint)
 	return (canwrite);
 }
 
-static const struct filterops ttyread_filtops =
-	{ 1, NULL, filt_ttyrdetach, filt_ttyread };
-static const struct filterops ttywrite_filtops =
-	{ 1, NULL, filt_ttywdetach, filt_ttywrite };
+static const struct filterops ttyread_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_ttyrdetach,
+	.f_event = filt_ttyread,
+};
+
+static const struct filterops ttywrite_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_ttywdetach,
+	.f_event = filt_ttywrite,
+};
 
 int
 ttykqfilter(dev_t dev, struct knote *kn)
@@ -2174,7 +2179,7 @@ ttwrite(struct tty *tp, struct uio *uio, int flag)
 		 * leftover from last time.
 		 */
 		if (cc == 0) {
-			cc = min(uio->uio_resid, OBUFSIZ);
+			cc = uimin(uio->uio_resid, OBUFSIZ);
 			cp = obuf;
 			error = uiomove(cp, cc, uio);
 			if (error) {
@@ -2915,7 +2920,6 @@ tty_init(void)
 {
 
 	mutex_init(&tty_lock, MUTEX_DEFAULT, IPL_VM);
-	rw_init(&ttcompat_lock);
 	tty_sigsih = softint_establish(SOFTINT_CLOCK, ttysigintr, NULL);
 	KASSERT(tty_sigsih != NULL);
 

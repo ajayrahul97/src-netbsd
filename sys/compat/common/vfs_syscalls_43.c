@@ -1,4 +1,4 @@
-/*	$NetBSD: vfs_syscalls_43.c,v 1.57 2014/09/05 09:21:54 matt Exp $	*/
+/*	$NetBSD: vfs_syscalls_43.c,v 1.64 2019/01/27 02:08:39 pgoyette Exp $	*/
 
 /*
  * Copyright (c) 1989, 1993
@@ -37,7 +37,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_43.c,v 1.57 2014/09/05 09:21:54 matt Exp $");
+__KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_43.c,v 1.64 2019/01/27 02:08:39 pgoyette Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_compat_netbsd.h"
@@ -58,13 +58,13 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_43.c,v 1.57 2014/09/05 09:21:54 matt Ex
 #include <sys/malloc.h>
 #include <sys/ioctl.h>
 #include <sys/fcntl.h>
-#include <sys/sysctl.h>
 #include <sys/syslog.h>
 #include <sys/unistd.h>
 #include <sys/resourcevar.h>
-#include <sys/sysctl.h>
 
 #include <sys/mount.h>
+#include <sys/syscall.h>
+#include <sys/syscallvar.h>
 #include <sys/syscallargs.h>
 #include <sys/vfs_syscalls.h>
 
@@ -75,7 +75,37 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_syscalls_43.c,v 1.57 2014/09/05 09:21:54 matt Ex
 #include <compat/common/compat_util.h>
 #include <compat/common/compat_mod.h>
 
+static void cvttimespec(struct timespec *, struct timespec50 *);
 static void cvtstat(struct stat *, struct stat43 *);
+
+static struct syscall_package vfs_syscalls_43_syscalls[] = {
+	{ SYS_compat_43_oquota, 0, (sy_call_t *)compat_43_sys_quota },
+	{ 0, 0, NULL }
+};
+
+/*
+ * Convert from an old to a new timespec structure.
+ */
+static void
+cvttimespec(struct timespec *ts, struct timespec50 *ots)
+{
+
+	if (ts->tv_sec > INT_MAX) {
+#if defined(DEBUG) || 1
+		static bool first = true;
+
+		if (first) {
+			first = false;
+			printf("%s[%s:%d]: time_t does not fit\n",
+			    __func__, curlwp->l_proc->p_comm,
+			    curlwp->l_lid);
+		}
+#endif
+		ots->tv_sec = INT_MAX;
+	} else
+		ots->tv_sec = ts->tv_sec;
+	ots->tv_nsec = ts->tv_nsec;
+}
 
 /*
  * Convert from an old to a new stat structure.
@@ -84,6 +114,8 @@ static void
 cvtstat(struct stat *st, struct stat43 *ost)
 {
 
+	/* Handle any padding. */
+	memset(ost, 0, sizeof *ost);
 	ost->st_dev = st->st_dev;
 	ost->st_ino = st->st_ino;
 	ost->st_mode = st->st_mode & 0xffff;
@@ -95,9 +127,9 @@ cvtstat(struct stat *st, struct stat43 *ost)
 		ost->st_size = st->st_size;
 	else
 		ost->st_size = -2;
-	ost->st_atime = st->st_atime;
-	ost->st_mtime = st->st_mtime;
-	ost->st_ctime = st->st_ctime;
+	cvttimespec(&st->st_atimespec, &ost->st_atimespec);
+	cvttimespec(&st->st_mtimespec, &ost->st_mtimespec);
+	cvttimespec(&st->st_ctimespec, &ost->st_ctimespec);
 	ost->st_blksize = st->st_blksize;
 	ost->st_blocks = st->st_blocks;
 	ost->st_flags = st->st_flags;
@@ -390,7 +422,7 @@ compat_43_sys_getdirentries(struct lwp *l, const struct compat_43_sys_getdirentr
 
 	loff = fp->f_offset;
 	nbytes = SCARG(uap, count);
-	buflen = min(MAXBSIZE, nbytes);
+	buflen = uimin(MAXBSIZE, nbytes);
 	if (buflen < va.va_blocksize)
 		buflen = va.va_blocksize;
 	tbuf = malloc(buflen, M_TEMP, M_WAITOK);
@@ -424,8 +456,10 @@ again:
 	for (cookie = cookiebuf; len > 0; len -= reclen) {
 		bdp = (struct dirent *)inp;
 		reclen = bdp->d_reclen;
-		if (reclen & 3)
-			panic(__func__);
+		if (reclen & 3) {
+			error = EIO;
+			goto out;
+		}
 		if (bdp->d_fileno == 0) {
 			inp += reclen;	/* it is a hole; squish it out */
 			if (cookie)
@@ -434,6 +468,10 @@ again:
 				off += reclen;
 			continue;
 		}
+		if (bdp->d_namlen >= sizeof(idb.d_name))
+			idb.d_namlen = sizeof(idb.d_name) - 1;
+		else
+			idb.d_namlen = bdp->d_namlen;
 		old_reclen = _DIRENT_RECLEN(&idb, bdp->d_namlen);
 		if (reclen > len || resid < old_reclen) {
 			/* entry too big for buffer, so just stop */
@@ -447,8 +485,10 @@ again:
 		 */
 		idb.d_fileno = (uint32_t)bdp->d_fileno;
 		idb.d_reclen = (uint16_t)old_reclen;
-		idb.d_namlen = (uint16_t)bdp->d_namlen;
-		strcpy(idb.d_name, bdp->d_name);
+		idb.d_fileno = (uint32_t)bdp->d_fileno;
+		(void)memcpy(idb.d_name, bdp->d_name, idb.d_namlen);
+		memset(idb.d_name + idb.d_namlen, 0,
+		    idb.d_reclen - _DIRENT_NAMEOFF(&idb) - idb.d_namlen);
 		if ((error = copyout(&idb, outp, old_reclen)))
 			goto out;
 		/* advance past this real entry */
@@ -485,65 +525,16 @@ out1:
 	return copyout(&loff, SCARG(uap, basep), sizeof(long));
 }
 
-/*
- * sysctl helper routine for vfs.generic.conf lookups.
- */
-#if defined(COMPAT_09) || defined(COMPAT_43) || defined(COMPAT_44)
-
-static int
-sysctl_vfs_generic_conf(SYSCTLFN_ARGS)
+int
+vfs_syscalls_43_init(void)
 {
-        struct vfsconf vfc;
-        extern const char * const mountcompatnames[];
-        extern int nmountcompatnames;
-	struct sysctlnode node;
-	struct vfsops *vfsp;
-	u_int vfsnum;
 
-	if (namelen != 1)
-		return (ENOTDIR);
-	vfsnum = name[0];
-	if (vfsnum >= nmountcompatnames ||
-	    mountcompatnames[vfsnum] == NULL)
-		return (EOPNOTSUPP);
-	vfsp = vfs_getopsbyname(mountcompatnames[vfsnum]);
-	if (vfsp == NULL)
-		return (EOPNOTSUPP);
-
-	vfc.vfc_vfsops = vfsp;
-	strncpy(vfc.vfc_name, vfsp->vfs_name, sizeof(vfc.vfc_name));
-	vfc.vfc_typenum = vfsnum;
-	vfc.vfc_refcount = vfsp->vfs_refcount;
-	vfc.vfc_flags = 0;
-	vfc.vfc_mountroot = vfsp->vfs_mountroot;
-	vfc.vfc_next = NULL;
-	vfs_delref(vfsp);
-
-	node = *rnode;
-	node.sysctl_data = &vfc;
-	return (sysctl_lookup(SYSCTLFN_CALL(&node)));
+	return syscall_establish(NULL, vfs_syscalls_43_syscalls);
 }
 
-/*
- * Top level filesystem related information gathering.
- */
-void
-compat_sysctl_vfs(struct sysctllog **clog)
+int
+vfs_syscalls_43_fini(void)
 {
-	extern int nmountcompatnames;
 
-	sysctl_createv(clog, 0, NULL, NULL,
-		       CTLFLAG_PERMANENT|CTLFLAG_IMMEDIATE,
-		       CTLTYPE_INT, "maxtypenum",
-		       SYSCTL_DESCR("Highest valid filesystem type number"),
-		       NULL, nmountcompatnames, NULL, 0,
-		       CTL_VFS, VFS_GENERIC, VFS_MAXTYPENUM, CTL_EOL);
-	sysctl_createv(clog, 0, NULL, NULL,
-		       CTLFLAG_PERMANENT,
-		       CTLTYPE_STRUCT, "conf",
-		       SYSCTL_DESCR("Filesystem configuration information"),
-		       sysctl_vfs_generic_conf, 0, NULL,
-		       sizeof(struct vfsconf),
-		       CTL_VFS, VFS_GENERIC, VFS_CONF, CTL_EOL);
+	return syscall_disestablish(NULL, vfs_syscalls_43_syscalls);
 }
-#endif

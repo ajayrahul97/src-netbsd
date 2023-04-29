@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2019, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -65,7 +65,7 @@
  *
  ******************************************************************************/
 
-ACPI_STATUS
+ACPI_STATUS ACPI_INIT_FUNCTION
 AcpiLoadTables (
     void)
 {
@@ -111,22 +111,19 @@ AcpiLoadTables (
             "While loading namespace from ACPI tables"));
     }
 
-    if (!AcpiGbl_GroupModuleLevelCode)
+    /*
+     * Initialize the objects in the namespace that remain uninitialized.
+     * This runs the executable AML that may be part of the declaration of
+     * these name objects:
+     *     OperationRegions, BufferFields, Buffers, and Packages.
+     *
+     */
+    Status = AcpiNsInitializeObjects ();
+    if (ACPI_SUCCESS (Status))
     {
-        /*
-         * Initialize the objects that remain uninitialized. This
-         * runs the executable AML that may be part of the
-         * declaration of these objects:
-         * OperationRegions, BufferFields, Buffers, and Packages.
-         */
-        Status = AcpiNsInitializeObjects ();
-        if (ACPI_FAILURE (Status))
-        {
-            return_ACPI_STATUS (Status);
-        }
+        AcpiGbl_NamespaceInitialized = TRUE;
     }
 
-    AcpiGbl_NamespaceInitialized = TRUE;
     return_ACPI_STATUS (Status);
 }
 
@@ -163,6 +160,17 @@ AcpiTbLoadNamespace (
 
     (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
 
+#ifdef __ia64__
+    /*
+     * For ia64 ski emulator
+     */
+    if (AcpiGbl_DsdtIndex == ACPI_INVALID_TABLE_INDEX)
+    {
+        Status = AE_NO_ACPI_TABLES;
+        goto UnlockAndExit;
+    }
+#endif
+    
     /*
      * Load the namespace. The DSDT is required, but any SSDT and
      * PSDT tables are optional. Verify the DSDT.
@@ -170,7 +178,7 @@ AcpiTbLoadNamespace (
     Table = &AcpiGbl_RootTableList.Tables[AcpiGbl_DsdtIndex];
 
     if (!AcpiGbl_RootTableList.CurrentTableCount ||
-        !ACPI_COMPARE_NAME (Table->Signature.Ascii, ACPI_SIG_DSDT) ||
+        !ACPI_COMPARE_NAMESEG (Table->Signature.Ascii, ACPI_SIG_DSDT) ||
          ACPI_FAILURE (AcpiTbValidateTable (Table)))
     {
         Status = AE_NO_ACPI_TABLES;
@@ -207,11 +215,11 @@ AcpiTbLoadNamespace (
     memcpy (&AcpiGbl_OriginalDsdtHeader, AcpiGbl_DSDT,
         sizeof (ACPI_TABLE_HEADER));
 
-    (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
-
     /* Load and parse tables */
 
+    (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
     Status = AcpiNsLoadTable (AcpiGbl_DsdtIndex, AcpiGbl_RootNode);
+    (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
     if (ACPI_FAILURE (Status))
     {
         ACPI_EXCEPTION ((AE_INFO, Status, "[DSDT] table load failed"));
@@ -224,16 +232,15 @@ AcpiTbLoadNamespace (
 
     /* Load any SSDT or PSDT tables. Note: Loop leaves tables locked */
 
-    (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
     for (i = 0; i < AcpiGbl_RootTableList.CurrentTableCount; ++i)
     {
         Table = &AcpiGbl_RootTableList.Tables[i];
 
-        if (!AcpiGbl_RootTableList.Tables[i].Address ||
-            (!ACPI_COMPARE_NAME (Table->Signature.Ascii, ACPI_SIG_SSDT) &&
-             !ACPI_COMPARE_NAME (Table->Signature.Ascii, ACPI_SIG_PSDT) &&
-             !ACPI_COMPARE_NAME (Table->Signature.Ascii, ACPI_SIG_OSDT)) ||
-             ACPI_FAILURE (AcpiTbValidateTable (Table)))
+        if (!Table->Address ||
+            (!ACPI_COMPARE_NAMESEG (Table->Signature.Ascii, ACPI_SIG_SSDT) &&
+             !ACPI_COMPARE_NAMESEG (Table->Signature.Ascii, ACPI_SIG_PSDT) &&
+             !ACPI_COMPARE_NAMESEG (Table->Signature.Ascii, ACPI_SIG_OSDT)) ||
+            ACPI_FAILURE (AcpiTbValidateTable (Table)))
         {
             continue;
         }
@@ -242,6 +249,7 @@ AcpiTbLoadNamespace (
 
         (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
         Status =  AcpiNsLoadTable (i, AcpiGbl_RootNode);
+        (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
         if (ACPI_FAILURE (Status))
         {
             ACPI_EXCEPTION ((AE_INFO, Status, "(%4.4s:%8.8s) while loading table",
@@ -257,14 +265,12 @@ AcpiTbLoadNamespace (
         {
             TablesLoaded++;
         }
-
-        (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
     }
 
     if (!TablesFailed)
     {
         ACPI_INFO ((
-            "%u ACPI AML tables successfully acquired and loaded\n",
+            "%u ACPI AML tables successfully acquired and loaded",
             TablesLoaded));
     }
     else
@@ -277,6 +283,11 @@ AcpiTbLoadNamespace (
 
         Status = AE_CTRL_TERMINATE;
     }
+
+#ifdef ACPI_APPLICATION
+    ACPI_DEBUG_PRINT_RAW ((ACPI_DB_INIT, "\n"));
+#endif
+
 
 UnlockAndExit:
     (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
@@ -300,7 +311,7 @@ UnlockAndExit:
  *
  ******************************************************************************/
 
-ACPI_STATUS
+ACPI_STATUS ACPI_INIT_FUNCTION
 AcpiInstallTable (
     ACPI_PHYSICAL_ADDRESS   Address,
     BOOLEAN                 Physical)
@@ -366,52 +377,11 @@ AcpiLoadTable (
         return_ACPI_STATUS (AE_BAD_PARAMETER);
     }
 
-    /* Must acquire the interpreter lock during this operation */
-
-    Status = AcpiUtAcquireMutex (ACPI_MTX_INTERPRETER);
-    if (ACPI_FAILURE (Status))
-    {
-        return_ACPI_STATUS (Status);
-    }
-
     /* Install the table and load it into the namespace */
 
     ACPI_INFO (("Host-directed Dynamic ACPI Table Load:"));
-    (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
-
-    Status = AcpiTbInstallStandardTable (ACPI_PTR_TO_PHYSADDR (Table),
-        ACPI_TABLE_ORIGIN_EXTERNAL_VIRTUAL, TRUE, FALSE,
-        &TableIndex);
-
-    (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
-    if (ACPI_FAILURE (Status))
-    {
-        goto UnlockAndExit;
-    }
-
-    /*
-     * Note: Now table is "INSTALLED", it must be validated before
-     * using.
-     */
-    Status = AcpiTbValidateTable (
-        &AcpiGbl_RootTableList.Tables[TableIndex]);
-    if (ACPI_FAILURE (Status))
-    {
-        goto UnlockAndExit;
-    }
-
-    Status = AcpiNsLoadTable (TableIndex, AcpiGbl_RootNode);
-
-    /* Invoke table handler if present */
-
-    if (AcpiGbl_TableHandler)
-    {
-        (void) AcpiGbl_TableHandler (ACPI_TABLE_EVENT_LOAD, Table,
-            AcpiGbl_TableHandlerContext);
-    }
-
-UnlockAndExit:
-    (void) AcpiUtReleaseMutex (ACPI_MTX_INTERPRETER);
+    Status = AcpiTbInstallAndLoadTable (ACPI_PTR_TO_PHYSADDR (Table),
+        ACPI_TABLE_ORIGIN_EXTERNAL_VIRTUAL, FALSE, &TableIndex);
     return_ACPI_STATUS (Status);
 }
 
@@ -466,9 +436,9 @@ AcpiUnloadParentTable (
         return_ACPI_STATUS (AE_TYPE);
     }
 
-    /* Must acquire the interpreter lock during this operation */
+    /* Must acquire the table lock during this operation */
 
-    Status = AcpiUtAcquireMutex (ACPI_MTX_INTERPRETER);
+    Status = AcpiUtAcquireMutex (ACPI_MTX_TABLES);
     if (ACPI_FAILURE (Status))
     {
         return_ACPI_STATUS (Status);
@@ -489,7 +459,7 @@ AcpiUnloadParentTable (
          * only these types can contain AML and thus are the only types
          * that can create namespace objects.
          */
-        if (ACPI_COMPARE_NAME (
+        if (ACPI_COMPARE_NAMESEG (
                 AcpiGbl_RootTableList.Tables[i].Signature.Ascii,
                 ACPI_SIG_DSDT))
         {
@@ -497,41 +467,13 @@ AcpiUnloadParentTable (
             break;
         }
 
-        /* Ensure the table is actually loaded */
-
-        if (!AcpiTbIsTableLoaded (i))
-        {
-            Status = AE_NOT_EXIST;
-            break;
-        }
-
-        /* Invoke table handler if present */
-
-        if (AcpiGbl_TableHandler)
-        {
-            (void) AcpiGbl_TableHandler (ACPI_TABLE_EVENT_UNLOAD,
-                AcpiGbl_RootTableList.Tables[i].Pointer,
-                AcpiGbl_TableHandlerContext);
-        }
-
-        /*
-         * Delete all namespace objects owned by this table. Note that
-         * these objects can appear anywhere in the namespace by virtue
-         * of the AML "Scope" operator. Thus, we need to track ownership
-         * by an ID, not simply a position within the hierarchy.
-         */
-        Status = AcpiTbDeleteNamespaceByOwner (i);
-        if (ACPI_FAILURE (Status))
-        {
-            break;
-        }
-
-        Status = AcpiTbReleaseOwnerId (i);
-        AcpiTbSetTableLoadedFlag (i, FALSE);
+        (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
+        Status = AcpiTbUnloadTable (i);
+        (void) AcpiUtAcquireMutex (ACPI_MTX_TABLES);
         break;
     }
 
-    (void) AcpiUtReleaseMutex (ACPI_MTX_INTERPRETER);
+    (void) AcpiUtReleaseMutex (ACPI_MTX_TABLES);
     return_ACPI_STATUS (Status);
 }
 

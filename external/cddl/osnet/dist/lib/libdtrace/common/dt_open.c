@@ -22,7 +22,7 @@
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
- * Copyright (c) 2012 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2016 by Delphix. All rights reserved.
  */
 
 #include <sys/types.h>
@@ -130,8 +130,9 @@
 #define	DT_VERS_1_11	DT_VERSION_NUMBER(1, 11, 0)
 #define	DT_VERS_1_12	DT_VERSION_NUMBER(1, 12, 0)
 #define	DT_VERS_1_12_1	DT_VERSION_NUMBER(1, 12, 1)
-#define	DT_VERS_LATEST	DT_VERS_1_12_1
-#define	DT_VERS_STRING	"Sun D 1.12.1"
+#define	DT_VERS_1_13	DT_VERSION_NUMBER(1, 13, 0)
+#define	DT_VERS_LATEST	DT_VERS_1_13
+#define	DT_VERS_STRING	"Sun D 1.13"
 
 const dt_version_t _dtrace_versions[] = {
 	DT_VERS_1_0,	/* D API 1.0.0 (PSARC 2001/466) Solaris 10 FCS */
@@ -157,6 +158,7 @@ const dt_version_t _dtrace_versions[] = {
 	DT_VERS_1_11,	/* D API 1.11 */
 	DT_VERS_1_12,	/* D API 1.12 */
 	DT_VERS_1_12_1,	/* D API 1.12.1 */
+	DT_VERS_1_13,	/* D API 1.13 */
 	0
 };
 
@@ -390,8 +392,6 @@ static const dt_ident_t _dtrace_globals[] = {
 	&dt_idops_func, "void(@, ...)" },
 { "printm", DT_IDENT_ACTFUNC, 0, DT_ACT_PRINTM, DT_ATTR_STABCMN, DT_VERS_1_0,
 	&dt_idops_func, "void(size_t, uintptr_t *)" },
-{ "printt", DT_IDENT_ACTFUNC, 0, DT_ACT_PRINTT, DT_ATTR_STABCMN, DT_VERS_1_0,
-	&dt_idops_func, "void(size_t, uintptr_t *)" },
 { "probefunc", DT_IDENT_SCALAR, 0, DIF_VAR_PROBEFUNC,
 	DT_ATTR_STABCMN, DT_VERS_1_0, &dt_idops_type, "string" },
 { "probemod", DT_IDENT_SCALAR, 0, DIF_VAR_PROBEMOD,
@@ -503,8 +503,6 @@ static const dt_ident_t _dtrace_globals[] = {
 	&dt_idops_func, "void(@, size_t, ...)" },
 { "trunc", DT_IDENT_ACTFUNC, 0, DT_ACT_TRUNC, DT_ATTR_STABCMN,
 	DT_VERS_1_0, &dt_idops_func, "void(...)" },
-{ "typeref", DT_IDENT_FUNC, 0, DIF_SUBR_TYPEREF, DT_ATTR_STABCMN, DT_VERS_1_1,
-	&dt_idops_func, "uintptr_t *(void *, size_t, string, size_t)" },
 { "uaddr", DT_IDENT_ACTFUNC, 0, DT_ACT_UADDR, DT_ATTR_STABCMN,
 	DT_VERS_1_2, &dt_idops_func, "_usymaddr(uintptr_t)" },
 { "ucaller", DT_IDENT_SCALAR, 0, DIF_VAR_UCALLER, DT_ATTR_STABCMN,
@@ -941,9 +939,11 @@ dt_provmod_open(dt_provmod_t **provmod, dt_fdlist_t *dfp)
 			 * reallocate it. We normally won't need to do this
 			 * because providers aren't being loaded all the time.
 			 */
-			if ((p = realloc(p_providers,len)) == NULL)
+			if ((p = realloc(p_providers,len)) == NULL) {
+				free(p_providers);
 				/* How do we report errors here? */
 				return;
+			}
 			p_providers = p;
 		} else
 			break;
@@ -1025,24 +1025,15 @@ dt_get_sysinfo(int cmd, char *buf, size_t len)
 }
 #endif
 
-#ifndef illumos
-# ifdef __FreeBSD__
-#  define DEFKERNEL	"kernel"
-#  define BOOTFILE	"kern.bootfile"
-# endif
-# ifdef __NetBSD__
-#  define DEFKERNEL	"netbsd"
-#  define BOOTFILE	"machdep.booted_kernel"
-# endif
-
-const char *
+#ifdef __FreeBSD__
+static const char *
 dt_bootfile(char *bootfile, size_t len)
 {
 	char *p;
 	size_t olen = len;
 
-	if (sysctlbyname(BOOTFILE, bootfile, &len, NULL, 0) != 0)
-		strlcpy(bootfile, DEFKERNEL, olen);
+	if (sysctlbyname("kern.bootfile", bootfile, &len, NULL, 0) != 0)
+		strlcpy(bootfile, "kernel", olen);
 
 	if ((p = strrchr(bootfile, '/')) != NULL)
 		p++;
@@ -1050,9 +1041,6 @@ dt_bootfile(char *bootfile, size_t len)
 		p = bootfile;
 	return p;
 }
-
-# undef DEFKERNEL
-# undef BOOTFILE
 #endif
 
 static dtrace_hdl_t *
@@ -1140,9 +1128,36 @@ dt_vopen(int version, int flags, int *errp,
 	 */
 	dt_provmod_open(&provmod, &df);
 
+#if defined(__NetBSD__)
+	modctl_load_t cmdargs;
+	const char * const mod_list[] = {
+		"dtrace",
+		"dtrace_sdt",
+		"dtrace_fbt",
+		"dtrace_syscall"
+	};
+
+	dtfd = -1;
+	err = 0;
+	for (i = 0; i < __arraycount(mod_list); i++) {
+		cmdargs.ml_filename = mod_list[i];
+		cmdargs.ml_flags = MODCTL_NO_PROP;
+		cmdargs.ml_props = NULL;
+		cmdargs.ml_propslen = 0;
+
+		if (modctl(MODCTL_LOAD, &cmdargs) < 0 && errno != EEXIST) {
+			err = errno;
+			break;
+		}
+	}
+	if (err == 0) {
+		dtfd = open("/dev/dtrace/dtrace", O_RDWR);
+		err = errno; /* save errno from opening dtfd */
+	}
+#endif
+#if defined(__FreeBSD__)
 	dtfd = open("/dev/dtrace/dtrace", O_RDWR);
 	err = errno; /* save errno from opening dtfd */
-#if defined(__FreeBSD__)
 	/*
 	 * Automatically load the 'dtraceall' module if we couldn't open the
 	 * char device.
@@ -1190,8 +1205,10 @@ dt_vopen(int version, int flags, int *errp,
 	(void) fcntl(ftfd, F_SETFD, FD_CLOEXEC);
 
 alloc:
-	if ((dtp = malloc(sizeof (dtrace_hdl_t))) == NULL)
+	if ((dtp = malloc(sizeof (dtrace_hdl_t))) == NULL) {
+	        dt_provmod_destroy(&provmod);
 		return (set_open_errno(dtp, errp, EDT_NOMEM));
+	}
 
 	bzero(dtp, sizeof (dtrace_hdl_t));
 	dtp->dt_oflags = flags;
@@ -1339,8 +1356,8 @@ alloc:
 
 	/*
 	 * On FreeBSD the kernel module name can't be hard-coded. The
-	 * 'kern.bootfile' sysctl value tells us exactly which file is
-	 * being used as the kernel.
+	 * 'kern.bootfile' sysctl value tells us exactly which file is being
+	 * used as the kernel.
 	 */
 #ifndef illumos
 # ifdef __FreeBSD__
@@ -1355,9 +1372,13 @@ alloc:
 # endif
 	{
 	const char *p;
+# ifdef __FreeBSD__
 	char kernname[512];
 
 	p = dt_bootfile(kernname, sizeof(kernname));
+# else
+	p = "netbsd";
+# endif
 
 	/*
 	 * Format the global variables based on the kernel module name.

@@ -1,4 +1,4 @@
-#	$NetBSD: bsd.x11.mk,v 1.119 2016/05/29 03:02:07 nakayama Exp $
+#	$NetBSD: bsd.x11.mk,v 1.132 2019/07/10 21:53:35 mrg Exp $
 
 .include <bsd.init.mk>
 
@@ -44,7 +44,7 @@ X11FLAGS.EXTENSION=	${X11FLAGS.BASE_EXTENSION} \
 			${X11FLAGS.PERVASIVE_EXTENSION}
 
 X11FLAGS.DIX=		-DHAVE_DIX_CONFIG_H -D_BSD_SOURCE -DHAS_FCHOWN \
-			-DHAS_STICKY_DIR_BIT -D_POSIX_THREAD_SAFE_FUNCTIONS \
+			-DHAS_STICKY_DIR_BIT -D_POSIX_THREAD_SAFE_FUNCTIONS=200112L \
 			-DHAVE_XORG_CONFIG_H
 X11INCS.DIX=		-I${X11INCSDIR}/freetype2  \
 			-I${X11INCSDIR}/pixman-1 \
@@ -85,17 +85,24 @@ X11FLAGS.OS_DEFINES=	-DDDXOSINIT -DSERVER_LOCK -DDDXOSFATALERROR \
     ${MACHINE} == "amiga"	|| \
     ${MACHINE} == "pmax"	|| \
     ${MACHINE} == "sun3"	|| \
+    ${MACHINE} == "x68k"	|| \
     ${MACHINE} == "vax")
 #	EXT_DEFINES
 X11FLAGS.EXTENSION+=	-DXF86VIDMODE
 
+X11FLAGS.DIX+=		-DDBE -DXRECORD -DPRESENT
+
 #	ServerDefines
-X11FLAGS.SERVER+=	-DXINPUT -DXFreeXDGA -DXF86VIDMODE
+X11FLAGS.SERVER+=	-DXFreeXDGA -DXF86VIDMODE
+X11FLAGS.SERVER+=	-DXINPUT -DXSERVER_LIBPCIACCESS
 .endif
 
 .if ${MACHINE_ARCH} == "alpha"	|| \
+    ${MACHINE_ARCH} == "ia64"   || \
+    ${MACHINE_ARCH} == "powerpc64" || \
     ${MACHINE_ARCH} == "sparc64" || \
-    ${MACHINE_ARCH} == "x86_64"
+    ${MACHINE_ARCH} == "x86_64" || \
+    ${MACHINE_CPU} == "aarch64"
 #	ServerDefines
 X11FLAGS.SERVER+=	-D_XSERVER64
 X11FLAGS.EXTENSION+=	-D__GLX_ALIGN64
@@ -114,20 +121,30 @@ X11FLAGS.EXTENSION+=	-D__GLX_ALIGN64
     ${MACHINE} == "shark"	|| \
     ${MACHINE} == "zaurus"
 #	LOADABLE
-X11FLAGS.LOADABLE=	-DXFree86LOADER -DIN_MODULE -DXFree86Module \
-			${${ACTIVE_CXX} == "gcc":? -fno-merge-constants :}
+.if ${XORG_SERVER_SUBDIR:Uxorg-server.old} == "xorg-server.old"
+X11FLAGS.LOADABLE=	-DXFree86LOADER
+.endif
+X11FLAGS.LOADABLE+=	${${ACTIVE_CXX} == "gcc":? -fno-merge-constants :}
+.endif
+
+# XXX FIX ME
+XORG_SERVER_MAJOR=	1
+.if ${XORG_SERVER_SUBDIR:Uxorg-server.old} == "xorg-server.old"
+XORG_SERVER_MINOR=	10
+XORG_SERVER_TEENY=	6
+.else
+XORG_SERVER_MINOR=	20
+XORG_SERVER_TEENY=	5
 .endif
   
-# XXX FIX ME
 XVENDORNAMESHORT=	'"X.Org"'
 XVENDORNAME=		'"The X.Org Foundation"'
-XORG_RELEASE=		'"Release 1.10.6"'
+XORG_RELEASE=		'"Release ${XORG_SERVER_MAJOR}.${XORG_SERVER_MINOR}.${XORG_SERVER_TEENY}"'
 __XKBDEFRULES__=	'"xorg"'
 XLOCALE.DEFINES=	-DXLOCALEDIR=\"${X11LIBDIR}/locale\" \
 			-DXLOCALELIBDIR=\"${X11LIBDIR}/locale\"
 
-# XXX oh yeah, fix me later
-XORG_VERSION_CURRENT="(((1) * 10000000) + ((10) * 100000) + ((6) * 1000) + 0)"
+XORG_VERSION_CURRENT="(((${XORG_SERVER_MAJOR}) * 10000000) + ((${XORG_SERVER_MINOR}) * 100000) + ((${XORG_SERVER_TEENY}) * 1000) + 0)"
 
 PRINT_PACKAGE_VERSION=	awk '/^PACKAGE_VERSION=/ {			\
 				match($$1, "([0-9]+\\.)+[0-9]+");	\
@@ -338,8 +355,14 @@ ${_pkg}.pc: ${PKGDIST.${_pkg}}/configure Makefile
 		s,@EXPAT_CFLAGS@,,; \
 		s,@FREETYPE_CFLAGS@,-I${X11ROOTDIR}/include/freetype2 -I${X11ROOTDIR}/include,;" \
 		-e '/^Libs:/ s%-L\([^ 	]*\)%-Wl,-rpath,\1 &%g' \
-		< ${.IMPSRC} > ${.TARGET}.tmp && \
-	mv -f ${.TARGET}.tmp ${.TARGET}
+		< ${.IMPSRC} > ${.TARGET}.tmp
+	if ${TOOL_GREP} '@.*@' ${.TARGET}.tmp; then \
+		echo "${.TARGET} matches @.*@, probably missing updates" 1>&2; \
+		false; \
+	else \
+		${MV} ${.TARGET}.tmp ${.TARGET}; \
+	fi
+
 
 CLEANFILES+= ${_PKGCONFIG_FILES} ${_PKGCONFIG_FILES:C/$/.tmp/}
 .endif
@@ -378,6 +401,10 @@ _X11MANTRANSFORM= \
 	__apploaddir__		${X11ROOTDIR}/lib/X11/app-defaults \
 	__appmansuffix__ 	1 \
 	__bindir__		${X11BINDIR} \
+	__datadir__		${X11LIBDIR} \
+	__libdir__		${X11ROOTDIR}/lib \
+	__xkbconfigroot__	${X11LIBDIR}/xkb \
+	__sysconfdir__		/etc \
 	__drivermansuffix__	4 \
 	__filemansuffix__	5 \
 	__LIB_MAN_SUFFIX__	3 \
@@ -396,7 +423,7 @@ _X11MANTRANSFORM+= \
 	__vendorversion__	${XORGVERSION:C/ /%/gW} \
 	__XCONFIGFILE__		xorg.conf \
 	__xconfigfile__		xorg.conf \
-	__XCONFIGFILEMAN__	'__XCONFIGFILE__%(__filemansuffix__)' \
+	__XCONFIGFILEMAN__	'xorg.conf(5)' \
 	__xorgversion__		${XORGVERSION:C/ /%/gW} \
 	__XSERVERNAME__		Xorg \
 	__xservername__		Xorg

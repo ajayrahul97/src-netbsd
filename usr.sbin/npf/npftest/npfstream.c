@@ -1,4 +1,4 @@
-/*	$NetBSD: npfstream.c,v 1.6 2013/11/08 00:38:26 rmind Exp $	*/
+/*	$NetBSD: npfstream.c,v 1.9 2019/07/23 00:52:02 rmind Exp $	*/
 
 /*
  * NPF stream processor.
@@ -16,6 +16,7 @@
 
 #include <arpa/inet.h>
 
+#if !defined(_NPF_STANDALONE)
 #include <net/if.h>
 #include <net/ethertypes.h>
 #include <net/if_ether.h>
@@ -25,6 +26,7 @@
 #include <netinet/tcp.h>
 
 #include <rump/rump.h>
+#endif
 
 #include "npftest.h"
 
@@ -40,16 +42,19 @@ process_tcpip(const void *data, size_t len, FILE *fp, ifnet_t *ifp)
 	const struct tcphdr *th;
 	unsigned hlen, tcpdlen;
 	int error, packetno;
+	const void *p;
 	tcp_seq seq;
 	bool forw;
 
 	if (ntohs(eth->ether_type) != ETHERTYPE_IP) {
-		ip = (const struct ip *)((const char *)data + 4);
+		p = (const char *)data + 4;
 	} else {
-		ip = (const struct ip *)(eth + 1);
+		p = eth + 1;
 	}
+	ip = (const struct ip *)p;
 	hlen = ip->ip_hl << 2;
-	th = (const struct tcphdr *)((const uint8_t *)ip + hlen);
+	p = (const uint8_t *)ip + hlen;
+	th = (const struct tcphdr *)p;
 
 	tcpdlen = ntohs(ip->ip_len) - hlen - (th->th_off << 2);
 	if (th->th_flags & TH_SYN) {
@@ -75,7 +80,7 @@ process_tcpip(const void *data, size_t len, FILE *fp, ifnet_t *ifp)
 
 	fprintf(fp, "%s%2x %5d %3d %11u %11u %11u %11u %12" PRIxPTR,
 	    forw ? ">" : "<", (th->th_flags & (TH_SYN | TH_ACK | TH_FIN)),
-	    packetno, error, (u_int)seq, (u_int)ntohl(th->th_ack),
+	    packetno, error, (unsigned)seq, (unsigned)ntohl(th->th_ack),
 	    tcpdlen, ntohs(th->th_win), (uintptr_t)result[0]);
 
 	for (unsigned i = 1; i < __arraycount(result); i++) {

@@ -1,4 +1,4 @@
-/*	$NetBSD: db_disasm.c,v 1.23 2016/03/25 10:14:43 shm Exp $	*/
+/*	$NetBSD: db_disasm.c,v 1.27 2019/03/09 08:42:25 maxv Exp $	*/
 
 /* 
  * Mach Operating System
@@ -33,7 +33,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: db_disasm.c,v 1.23 2016/03/25 10:14:43 shm Exp $");
+__KERNEL_RCSID(0, "$NetBSD: db_disasm.c,v 1.27 2019/03/09 08:42:25 maxv Exp $");
 
 #ifndef _KERNEL
 #include <sys/types.h>
@@ -1207,8 +1207,12 @@ db_disasm(db_addr_t loc, bool altfmt)
 		pte = kvtopte((vaddr_t)loc);
 	else
 		pte = vtopte((vaddr_t)loc);
-	pde = vtopte((vaddr_t)pte);
-	if ((*pde & PG_V) == 0 || (*pte & PG_V) == 0) {
+	if ((vaddr_t)pte >= VM_MIN_KERNEL_ADDRESS)
+		pde = kvtopte((vaddr_t)pte);
+	else
+		pde = vtopte((vaddr_t)pte);
+
+	if ((*pde & PTE_P) == 0 || (*pte & PTE_P) == 0) {
 		db_printf("invalid address\n");
 		return (loc);
 	}
@@ -1376,20 +1380,33 @@ db_disasm(db_addr_t loc, bool altfmt)
 
 		switch (i_mode & 0xFF) {
 		case E:
-			db_print_address(seg, rex, size, &address);
-			break;
 		case Eind:
-			db_printf("*");
-			db_print_address(seg, rex, size, &address);
-			break;
 		case Ed:
-			db_print_address(seg, rex, LONG, &address);
-			break;
 		case Ew:
-			db_print_address(seg, rex, WORD, &address);
-			break;
 		case Eb:
-			db_print_address(seg, rex, BYTE, &address);
+			if (!ip->i_has_modrm) {
+				db_printf("Bad address mode %#x without modrm",
+				    i_mode);
+				break;
+			}
+			switch (i_mode & 0xFF) {
+			case E:
+				db_print_address(seg, rex, size, &address);
+				break;
+			case Eind:
+				db_printf("*");
+				db_print_address(seg, rex, size, &address);
+				break;
+			case Ed:
+				db_print_address(seg, rex, LONG, &address);
+				break;
+			case Ew:
+				db_print_address(seg, rex, WORD, &address);
+				break;
+			case Eb:
+				db_print_address(seg, rex, BYTE, &address);
+				break;
+			}
 			break;
 		case R: {
 			int ext = ((rex & REX_R) != 0);
@@ -1449,6 +1466,7 @@ db_disasm(db_addr_t loc, bool altfmt)
 				db_printf("$%s", tbuf);
 				break;
 			}
+			/* FALLTHROUGH */
 		case I:
 			len = db_lengths[size];
 			get_value_inc(imm, loc, len, false);/* unsigned */

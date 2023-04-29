@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.87 2016/03/22 08:25:23 mrg Exp $
+#	$NetBSD: Makefile,v 1.91 2019/07/21 16:53:17 rin Exp $
 
 LIB=	sa
 LIBISPRIVATE?= yes
@@ -7,12 +7,21 @@ SA_USE_CREAD?= no		# Read compressed kernels
 SA_INCLUDE_NET?= yes		# Netboot via TFTP, NFS
 SA_USE_LOADFILE?= no		# Generic executable loading support
 SA_ENABLE_LS_OP?= no		# Filesystems ls operation
+SA_ENABLE_BIENDIAN?= no		# Biendian support
+				# (currently only for loadfile_elf*)
 
 #DEBUGCPPFLAGS= -DBOOTP_DEBUG -DNETIF_DEBUG -DETHER_DEBUG -DNFS_DEBUG -DRPC_DEBUG -DRARP_DEBUG -DARP_DEBUG -DNET_DEBUG -DDEBUG -DPARANOID
 CPPFLAGS=	-I${SADIR} ${SACPPFLAGS} ${SAMISCCPPFLAGS} \
 		-DCOMPAT_UFS ${DEBUGCPPFLAGS}
 
 #COPTS+= -ansi -pedantic -Wall
+
+# For testing
+#WARNS=6
+#NOSSP=yes
+#NOFORTIFY=yes
+#COPTS+=-ffreestanding -Wpointer-sign
+#CPPFLAGS+= -I${.CURDIR}/../../ -I${.CURDIR}
 
 .if defined(SA_EXTRADIR)
 .-include "${SA_EXTRADIR}/Makefile.inc"
@@ -66,6 +75,11 @@ SRCS+=	bootp.c rarp.c bootparam.c
 SRCS+=	nfs.c tftp.c
 .endif
 
+.if (${SA_ENABLE_BIENDIAN} == "yes")
+CPPFLAGS+=	-DLIBSA_BIENDIAN_SUPPORT
+SRCS+=		byteorder.c
+.endif
+
 SRCS+=	ffsv1.c ffsv2.c
 SRCS+=	lfsv1.c lfsv2.c
 SRCS+=	cd9660.c
@@ -79,10 +93,7 @@ SRCS+=	ufs.c
 
 .include <bsd.lib.mk>
 
-lib${LIB}.o:: ${OBJS:O}
-	@echo building standard ${LIB} library
-	@rm -f lib${LIB}.o
-	@${LD} -r -o lib${LIB}.o `lorder ${OBJS} | tsort`
+lib${LIB}.o:: ${OBJS:O} __buildstdlib
 
 CPPFLAGS+=	-Wno-pointer-sign
 

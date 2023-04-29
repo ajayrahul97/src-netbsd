@@ -184,7 +184,7 @@ rump_syspuffs_glueinit(int fd, int *newfd)
 	struct ptargs *pap;
 	int rv;
 
-	if ((rv = rump_init()) != 0)
+	if ((rv = rump_init(NULL)) != 0)
 		return rv;
 
 	putterattach();

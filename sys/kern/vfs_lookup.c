@@ -1,4 +1,4 @@
-/*	$NetBSD: vfs_lookup.c,v 1.205 2016/04/22 05:34:58 riastradh Exp $	*/
+/*	$NetBSD: vfs_lookup.c,v 1.212 2019/07/18 09:39:40 hannken Exp $	*/
 
 /*
  * Copyright (c) 1982, 1986, 1989, 1993
@@ -37,7 +37,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: vfs_lookup.c,v 1.205 2016/04/22 05:34:58 riastradh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: vfs_lookup.c,v 1.212 2019/07/18 09:39:40 hannken Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_magiclinks.h"
@@ -262,9 +262,6 @@ pathbuf_create_raw(void)
 	struct pathbuf *pb;
 
 	pb = kmem_alloc(sizeof(*pb), KM_SLEEP);
-	if (pb == NULL) {
-		return NULL;
-	}
 	pb->pb_path = PNBUF_GET();
 	if (pb->pb_path == NULL) {
 		kmem_free(pb, sizeof(*pb));
@@ -290,9 +287,6 @@ pathbuf_assimilate(char *pnbuf)
 	struct pathbuf *pb;
 
 	pb = kmem_alloc(sizeof(*pb), KM_SLEEP);
-	if (pb == NULL) {
-		return NULL;
-	}
 	pb->pb_path = pnbuf;
 	pb->pb_pathcopy = NULL;
 	pb->pb_pathcopyuses = 0;
@@ -475,6 +469,8 @@ struct namei_state {
 	int slashes;
 
 	unsigned attempt_retry:1;	/* true if error allows emul retry */
+	unsigned root_referenced:1;	/* true if ndp->ni_rootdir and
+					     ndp->ni_erootdir were referenced */
 };
 
 
@@ -491,6 +487,8 @@ namei_init(struct namei_state *state, struct nameidata *ndp)
 	state->docache = 0;
 	state->rdonly = 0;
 	state->slashes = 0;
+
+	state->root_referenced = 0;
 
 	KASSERTMSG((state->cnp->cn_cred != NULL), "namei: bad cred/proc");
 	KASSERTMSG(((state->cnp->cn_nameiop & (~OPMASK)) == 0),
@@ -516,8 +514,12 @@ namei_cleanup(struct namei_state *state)
 {
 	KASSERT(state->cnp == &state->ndp->ni_cnd);
 
-	/* nothing for now */
-	(void)state;
+	if (state->root_referenced) {
+		if (state->ndp->ni_rootdir != NULL)
+			vrele(state->ndp->ni_rootdir);
+		if (state->ndp->ni_erootdir != NULL)
+			vrele(state->ndp->ni_erootdir);
+	}
 }
 
 //////////////////////////////
@@ -535,6 +537,14 @@ namei_getstartdir(struct namei_state *state)
 	struct cwdinfo *cwdi;		/* pointer to cwd state */
 	struct lwp *self = curlwp;	/* thread doing namei() */
 	struct vnode *rootdir, *erootdir, *curdir, *startdir;
+
+	if (state->root_referenced) {
+		if (state->ndp->ni_rootdir != NULL)
+			vrele(state->ndp->ni_rootdir);
+		if (state->ndp->ni_erootdir != NULL)
+			vrele(state->ndp->ni_erootdir);
+		state->root_referenced = 0;
+	}
 
 	cwdi = self->l_proc->p_cwdi;
 	rw_enter(&cwdi->cwdi_lock, RW_READER);
@@ -584,11 +594,16 @@ namei_getstartdir(struct namei_state *state)
 	/*
 	 * Get a reference to the start dir so we can safely unlock cwdi.
 	 *
-	 * XXX: should we hold references to rootdir and erootdir while
-	 * we're running? What happens if a multithreaded process chroots
-	 * during namei?
+	 * Must hold references to rootdir and erootdir while we're running.
+	 * A multithreaded process may chroot during namei.
 	 */
-	vref(startdir);
+	if (startdir != NULL)
+		vref(startdir);
+	if (state->ndp->ni_rootdir != NULL)
+		vref(state->ndp->ni_rootdir);
+	if (state->ndp->ni_erootdir != NULL)
+		vref(state->ndp->ni_erootdir);
+	state->root_referenced = 1;
 
 	rw_exit(&cwdi->cwdi_lock);
 	return startdir;
@@ -605,10 +620,16 @@ namei_getstartdir_for_nfsd(struct namei_state *state)
 	KASSERT(state->ndp->ni_atdir != NULL);
 
 	/* always use the real root, and never set an emulation root */
+	if (rootvnode == NULL) {
+		return NULL;
+	}
 	state->ndp->ni_rootdir = rootvnode;
 	state->ndp->ni_erootdir = NULL;
 
 	vref(state->ndp->ni_atdir);
+	KASSERT(! state->root_referenced);
+	vref(state->ndp->ni_rootdir);
+	state->root_referenced = 1;
 	return state->ndp->ni_atdir;
 }
 
@@ -664,6 +685,7 @@ namei_start(struct namei_state *state, int isnfsd,
 	 * POSIX.1 requirement: "" is not a valid file name.
 	 */
 	if (ndp->ni_pathlen == 1) {
+		ndp->ni_erootdir = NULL;
 		return ENOENT;
 	}
 
@@ -678,9 +700,15 @@ namei_start(struct namei_state *state, int isnfsd,
 		namei_ktrace(state);
 	}
 
+	if (startdir == NULL) {
+		return ENOENT;
+	}
+
 	/* NDAT may feed us with a non directory namei_getstartdir */
-	if (startdir->v_type != VDIR)
+	if (startdir->v_type != VDIR) {
+		vrele(startdir);
 		return ENOTDIR;
+	}
 
 	vn_lock(startdir, LK_EXCLUSIVE | LK_RETRY);
 
@@ -1087,7 +1115,7 @@ unionlookup:
 
 		KASSERT(searchdir != foundobj);
 
-		error = vfs_busy(mp, NULL);
+		error = vfs_busy(mp);
 		if (error != 0) {
 			vput(foundobj);
 			goto done;
@@ -1097,7 +1125,7 @@ unionlookup:
 		}
 		vput(foundobj);
 		error = VFS_ROOT(mp, &foundobj);
-		vfs_unbusy(mp, false, NULL);
+		vfs_unbusy(mp);
 		if (error) {
 			if (searchdir != NULL) {
 				vn_lock(searchdir, LK_EXCLUSIVE | LK_RETRY);
