@@ -4,7 +4,7 @@
 .include <bsd.own.mk>
 
 RUMPKERNCOMPS=	crypto nv sysproxy tty z
-RUMPSYSEMUS=	sys_cygwin sys_linux sys_sunos
+RUMPSYSEMUS=	sys_cygwin sys_sunos
 
 .if make(rumpdescribe)
 RUMPKERNCOMPS+=	${RUMPSYSEMUS}

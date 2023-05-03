@@ -77,5 +77,5 @@
 	WEAK_ALIAS(weak,strong);					\
 	PSEUDO(strong,weak)
 
-	.hidden	__cerror
+	//.hidden	__cerror
 	.globl	__cerror

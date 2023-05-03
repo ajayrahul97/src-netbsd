@@ -42,10 +42,10 @@ END(_atomic_swap_32)
 
 ATOMIC_OP_ALIAS(atomic_swap_32,_atomic_swap_32)
 ATOMIC_OP_ALIAS(atomic_swap_uint,_atomic_swap_32)
-STRONG_ALIAS(__sync_lock_test_and_set_4,_atomic_swap_32)
+#STRONG_ALIAS(__sync_lock_test_and_set_4,_atomic_swap_32)
 STRONG_ALIAS(_atomic_swap_uint,_atomic_swap_32)
 
-ENTRY_NP(__sync_lock_release_4)
-	stlr	wzr, [x0]
-	ret
-END(__sync_lock_release_4)
+#ENTRY_NP(__sync_lock_release_4)
+#	stlr	wzr, [x0]
+#	ret
+#END(__sync_lock_release_4)

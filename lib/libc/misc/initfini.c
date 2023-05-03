@@ -114,7 +114,7 @@ _libc_init(void)
 		    __ps_strings->ps_nargvstr + __ps_strings->ps_nenvstr + 2;
 
 	/* For -fstack-protector */
-	__guard_setup();
+//	__guard_setup();
 
 	/* Atomic operations */
 	__libc_atomic_init();
